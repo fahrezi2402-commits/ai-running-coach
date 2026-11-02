@@ -1,6 +1,6 @@
 # AI Running Coach
 
-A local-first React app for a 157-week marathon plan, manual activity logging, pace guardrails, and weekly hip check-ins. Manual records and imported Strava run summaries are stored in the browser's LocalStorage. Strava OAuth and token handling run in same-origin Vercel Functions.
+A local-first React app for a fixed 157-week marathon planning template, manual activity logging, deterministic pace guardrails, and weekly hip check-ins. Coaching notes and guardrail decisions use application rules; no LLM is called. Manual records, profile, and imported Strava run summaries are stored in the browser's LocalStorage. Strava OAuth and token handling run in same-origin Vercel Functions.
 
 ## Run locally
 
@@ -40,6 +40,8 @@ Vercel Functions are required for live Strava access. The GitHub Pages workflow 
 The OAuth state is random, short-lived, and checked on callback. The Strava authorization-code exchange and token refresh happen on the server. Access and refresh tokens are encrypted with AES-256-GCM in a Secure (on HTTPS), HttpOnly, SameSite=Lax cookie; tokens are never returned to browser JavaScript or stored in LocalStorage. Disconnect revokes the Strava grant through Strava's OAuth revoke endpoint and clears the cookie. The cookie is a self-contained session with no database: clearing site cookies or changing the encryption key requires reconnecting, and sessions cannot be centrally revoked from another browser.
 
 Imported activity summaries are saved locally in the browser and are not synchronized between devices. Only run, trail-run, and virtual-run activities are imported. Importing a run dated today applies the existing easy-pace recovery guardrail; older runs are history only. The training plan and hip-status checks are planning aids, not medical advice or an individualized prescription.
+
+Use **Local data backup** in the app to export the local profile, activity records, hip check-ins, recovery dates, and pace guardrail history as JSON. Import validates the complete file and supported schema version before replacing those local records; unsupported or invalid files are rejected. Strava session cookies are not included. Keep backups private because they contain personal training information. The planner is a fixed template and does not automatically re-plan around missed sessions or changes in fitness.
 
 ## Build and static preview
 
