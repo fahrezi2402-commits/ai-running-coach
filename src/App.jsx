@@ -6,6 +6,8 @@ import {
   parsePaceInput,
   suggestedQualityPaceForWeek,
 } from "./paceProgression.js";
+import BodyweightExerciseIllustration from "./BodyweightExerciseIllustration.jsx";
+import { BODYWEIGHT_WORKOUT, isBodyweightWorkoutAvailable } from "./bodyweightWorkout.js";
 
 /*
  * AI Running Coach — single-file React SPA
@@ -1138,7 +1140,7 @@ export default function App() {
 
           <Panel
             title="Monthly training calendar"
-            subtitle="Daily sessions come from the 157-week plan. Select a day for workout details; saved hip check-ins and recovery locks override the planned session."
+            subtitle="Daily sessions come from the 157-week plan. Select a day for workout details; the no-equipment tutorial is available on eligible off-days, while hip check-ins and recovery locks take priority."
             action={(
               <div className="flex items-center gap-2">
                 <button
@@ -1237,6 +1239,23 @@ export default function App() {
                         : null}
                     <span>Weekly cap: {round1(selectedCalendarEntry.weekRow.targetVolume * (selectedCalendarEntry.hipLock ? 0.75 : 1)).toFixed(1)} km{selectedCalendarEntry.hipLock ? " (75% hip-status cap)" : ""}</span>
                   </div>
+                  {isBodyweightWorkoutAvailable(selectedCalendarEntry) ? (
+                    <a href="#bodyweight-workout-tutorial" className="mt-4 inline-flex rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:ring-offset-2 focus:ring-offset-slate-950">
+                      Buka tutorial full body tanpa alat
+                    </a>
+                  ) : selectedCalendarEntry.workout.locked || selectedCalendarEntry.workout.type === "Recovery" ? (
+                    <p className="mt-4 rounded-xl border border-amber-900/60 bg-amber-950/20 p-3 text-sm leading-6 text-amber-200">
+                      Prioritaskan istirahat / recovery sesuai status ini. Tutorial latihan tidak ditawarkan; mobilitas ringan tanpa nyeri hanya jika terasa nyaman.
+                    </p>
+                  ) : selectedCalendarEntry.week >= 150 ? (
+                    <p className="mt-4 rounded-xl border border-slate-800 bg-slate-900 p-3 text-sm leading-6 text-slate-400">
+                      Pada fase taper, pekan lomba, dan pemulihan, utamakan istirahat sesuai rencana.
+                    </p>
+                  ) : selectedCalendarEntry.workout.distance > 0 ? (
+                    <p className="mt-4 text-sm leading-6 text-slate-500">
+                      Tutorial ini hanya untuk hari Rest / Strength / Cross-training yang tidak terkunci—bukan pengganti sesi lari terjadwal.
+                    </p>
+                  ) : null}
                 </>
               ) : (
                 <>
@@ -1247,6 +1266,75 @@ export default function App() {
                 </>
               )}
             </div>
+            {isBodyweightWorkoutAvailable(selectedCalendarEntry) ? (
+              <section id="bodyweight-workout-tutorial" className="mt-4 scroll-mt-6 rounded-xl border border-emerald-900/60 bg-emerald-950/20 p-4 sm:p-5" aria-labelledby="bodyweight-workout-heading">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 id="bodyweight-workout-heading" className="text-lg font-semibold text-white">Tutorial full body tanpa alat</h3>
+                    <p className="mt-1 text-sm leading-6 text-slate-300">
+                      Pilihan opsional untuk hari libur / strength yang dipilih. Hanya memakai berat badan sendiri dan ruang lantai; tidak memakai dumbbell, beban, kursi, atau alat improvisasi.
+                    </p>
+                  </div>
+                  <Badge tone="emerald">2 PUTARAN · ±40–50 MENIT</Badge>
+                </div>
+
+                <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                    <h4 className="font-semibold text-slate-100">Pemanasan dinamis · 7–10 menit</h4>
+                    <ol className="mt-2 list-inside list-decimal space-y-1 text-sm leading-6 text-slate-300">
+                      {BODYWEIGHT_WORKOUT.warmup.map((item) => <li key={item.name}>{item.name}: {item.duration}.</li>)}
+                    </ol>
+                  </div>
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                    <h4 className="font-semibold text-slate-100">Circuit dan intensitas</h4>
+                    <p className="mt-2 text-sm leading-6 text-slate-300">
+                      Selesaikan setiap gerakan berurutan, lalu ulangi circuit 2 putaran. Putaran ketiga opsional bila sudah terbiasa dan tetap nyaman. Istirahat 60–90 detik setelah tiap gerakan dan 1–2 menit antar-putaran; kurangi repetisi atau berhenti sejenak bila perlu. Pemula dapat gunakan modifikasi low-impact.
+                    </p>
+                  </div>
+                </div>
+
+                <ol className="mt-4 grid gap-3 lg:grid-cols-2">
+                  {BODYWEIGHT_WORKOUT.movements.map((movement, index) => (
+                    <li key={movement.name} className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                      {index === 0 || BODYWEIGHT_WORKOUT.movements[index - 1].category !== movement.category ? (
+                        <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-emerald-300">{movement.category}</div>
+                      ) : null}
+                      <div className="grid gap-3 sm:grid-cols-[112px_1fr]">
+                        <BodyweightExerciseIllustration type={movement.illustration} label={movement.name} />
+                        <div>
+                          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                            <h4 className="font-semibold text-slate-100">{index + 1}. {movement.name}</h4>
+                            <span className="text-sm font-medium text-emerald-300">{movement.prescription}</span>
+                          </div>
+                          <ol className="mt-2 list-inside list-decimal space-y-1 text-sm leading-6 text-slate-300">
+                            {movement.steps.map((step) => <li key={step}>{step}</li>)}
+                          </ol>
+                          <p className="mt-2 text-xs leading-5 text-slate-400"><strong className="text-slate-300">Modifikasi pemula:</strong> {movement.easier}</p>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                    <h4 className="font-semibold text-slate-100">Pendinginan · 5–8 menit</h4>
+                    <ol className="mt-2 list-inside list-decimal space-y-1 text-sm leading-6 text-slate-300">
+                      {BODYWEIGHT_WORKOUT.cooldown.map((step) => <li key={step.name}>{step.name}: {step.duration}.</li>)}
+                    </ol>
+                  </div>
+                  <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                    <h4 className="font-semibold text-slate-100">Catatan penting</h4>
+                    <p className="mt-2 text-sm leading-6 text-slate-300">
+                      Lompatan diganti squat dan langkah samping low-impact; Bulgarian split squat diganti reverse lunge tanpa elevasi kaki. Doorframe/table row tidak digunakan karena furnitur bukan anchor yang terjamin aman; prone reverse snow angels menjadi gerakan postur di lantai, bukan klaim sebagai row berbeban.
+                    </p>
+                    <p className="mt-2 text-sm leading-6 text-amber-200">
+                      Ini opsional pada hari tanpa lari, bukan pengganti atau tambahan untuk mengejar jarak; tidak mengubah jadwal dan tidak dihitung dalam mileage atau volume mingguan. Jika ada nyeri/gejala berubah atau recovery/hip lock aktif, jangan lakukan circuit—pilih istirahat atau mobilitas ringan tanpa nyeri hanya jika nyaman.
+                    </p>
+                  </div>
+                </div>
+              </section>
+            ) : null}
           </Panel>
 
           <Panel title="157-week marathon plan" subtitle="A fixed planning template generated from 02 November 2026 through 04 November 2029. In weeks 1–149, increases are capped at 10% and each fourth-week target at 82% of prior volume. These are planning heuristics, not injury-prevention evidence; the plan does not adapt to missed sessions or changes in fitness. The current row reflects any hip-related 25% volume reduction.">
