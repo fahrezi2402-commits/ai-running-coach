@@ -338,7 +338,7 @@ function Badge({ children, tone = "slate" }) {
 
 function Panel({ title, subtitle, action, children, className = "" }) {
   return (
-    <section className={`rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/10 ${className}`}>
+    <section className={`min-w-0 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/10 ${className}`}>
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold text-slate-100">{title}</h2>
@@ -827,7 +827,7 @@ export default function App() {
               A structured 157-week marathon coaching workspace with pace guardrails, a weekly hip check-in, and locally saved training records.
             </p>
           </div>
-          <div className="rounded-xl border border-slate-800 bg-slate-900 px-4 py-3 text-sm">
+          <div className="w-full rounded-xl border border-slate-800 bg-slate-900 px-4 py-3 text-sm md:w-auto">
             <div className="text-xs uppercase tracking-wider text-slate-500">Training date</div>
             <div className="mt-1 font-semibold text-slate-100">{formatDate(today, { weekday: "long", day: "2-digit", month: "long", year: "numeric" })}</div>
             <div className="mt-1 text-xs text-slate-500">Plan: 02 Nov 2026 – {formatDate(TRAINING_PLAN[TOTAL_WEEKS - 1].end)}</div>
@@ -900,7 +900,7 @@ export default function App() {
             </Panel>
 
             <Panel title="Training profile" subtitle="Biometrics used as context for conservative coaching advice.">
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                 <div className="rounded-xl bg-slate-950 p-3"><div className="text-xs text-slate-500">Age</div><div className="mt-1 text-xl font-bold">{profile.age}</div><div className="text-xs text-slate-500">years</div></div>
                 <div className="rounded-xl bg-slate-950 p-3"><div className="text-xs text-slate-500">Height</div><div className="mt-1 text-xl font-bold">{profile.heightCm}</div><div className="text-xs text-slate-500">cm</div></div>
                 <div className="rounded-xl bg-slate-950 p-3">
@@ -939,7 +939,7 @@ export default function App() {
               <form onSubmit={saveMarathonGoalPace} className="mt-4 rounded-xl border border-slate-800 bg-slate-950/60 p-3">
                 <div className="space-y-1.5">
                   <label htmlFor="marathon-goal-pace" className="block text-sm font-medium text-slate-300">Aspirational marathon goal pace</label>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <input
                       id="marathon-goal-pace"
                       className={`${inputClass} max-w-36`}
@@ -1183,35 +1183,37 @@ export default function App() {
                 ))}
               </div>
             </div>
-            <div className="grid grid-cols-7 gap-1.5 sm:gap-2">
-              {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day) => (
-                <div key={day} className="px-1 py-2 text-center text-[10px] font-semibold uppercase tracking-wider text-slate-500 sm:text-xs">
-                  <span className="hidden sm:inline">{day}</span>
-                  <span className="sm:hidden">{day.slice(0, 3)}</span>
-                </div>
-              ))}
-              {calendarCells.map((date, index) => {
-                if (!date) return <div key={`empty-${index}`} className="min-h-20 rounded-lg sm:min-h-24" aria-hidden="true" />;
-                const dateIso = toLocalISODate(date);
-                const entry = getCalendarWorkoutForDate(date, checkIns, recoveryDates, marathonGoalPace);
-                const selected = dateIso === selectedCalendarDate;
-                return (
-                  <button
-                    key={dateIso}
-                    type="button"
-                    aria-label={`${formatDate(date, { weekday: "long", day: "numeric", month: "long", year: "numeric" })}: ${entry ? entry.workout.title : "outside plan period"}`}
-                    aria-pressed={selected}
-                    onClick={() => setSelectedCalendarDate(dateIso)}
-                    className={`min-h-20 rounded-lg border p-1.5 text-left transition hover:border-slate-500 sm:min-h-24 sm:p-2 ${selected ? "border-emerald-400 ring-1 ring-emerald-400/40" : "border-slate-800"} ${entry ? calendarTypeTone[entry.workout.type] || calendarTypeTone.Rest : "bg-slate-950/40 text-slate-600"}`}
-                  >
-                    <span className={`block text-xs font-semibold ${selected ? "text-white" : ""}`}>{date.getDate()}</span>
-                    <span className="mt-1 block truncate text-[10px] leading-4 sm:text-xs">
-                      {entry ? entry.workout.locked ? "Recovery lock" : entry.workout.title : "Outside plan"}
-                    </span>
-                    {entry && entry.workout.distance > 0 ? <span className="mt-0.5 block text-[10px] opacity-70">{entry.workout.distance.toFixed(1)} km</span> : null}
-                  </button>
-                );
-              })}
+            <div className="-mx-2 overflow-x-auto px-2 pb-2 sm:mx-0 sm:px-0 md:overflow-visible md:pb-0">
+              <div className="grid min-w-[490px] grid-cols-7 gap-1.5 sm:gap-2 md:min-w-0">
+                {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day) => (
+                  <div key={day} className="px-1 py-2 text-center text-[10px] font-semibold uppercase tracking-wider text-slate-500 sm:text-xs">
+                    <span className="hidden sm:inline">{day}</span>
+                    <span className="sm:hidden">{day.slice(0, 3)}</span>
+                  </div>
+                ))}
+                {calendarCells.map((date, index) => {
+                  if (!date) return <div key={`empty-${index}`} className="min-h-20 rounded-lg sm:min-h-24" aria-hidden="true" />;
+                  const dateIso = toLocalISODate(date);
+                  const entry = getCalendarWorkoutForDate(date, checkIns, recoveryDates, marathonGoalPace);
+                  const selected = dateIso === selectedCalendarDate;
+                  return (
+                    <button
+                      key={dateIso}
+                      type="button"
+                      aria-label={`${formatDate(date, { weekday: "long", day: "numeric", month: "long", year: "numeric" })}: ${entry ? entry.workout.title : "outside plan period"}`}
+                      aria-pressed={selected}
+                      onClick={() => setSelectedCalendarDate(dateIso)}
+                      className={`min-h-20 rounded-lg border p-1.5 text-left transition hover:border-slate-500 sm:min-h-24 sm:p-2 ${selected ? "border-emerald-400 ring-1 ring-emerald-400/40" : "border-slate-800"} ${entry ? calendarTypeTone[entry.workout.type] || calendarTypeTone.Rest : "bg-slate-950/40 text-slate-600"}`}
+                    >
+                      <span className={`block text-xs font-semibold ${selected ? "text-white" : ""}`}>{date.getDate()}</span>
+                      <span className="mt-1 block truncate text-[10px] leading-4 sm:text-xs">
+                        {entry ? entry.workout.locked ? "Recovery lock" : entry.workout.title : "Outside plan"}
+                      </span>
+                      {entry && entry.workout.distance > 0 ? <span className="mt-0.5 block text-[10px] opacity-70">{entry.workout.distance.toFixed(1)} km</span> : null}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/70 p-4" aria-live="polite">
               {selectedCalendarEntry ? (
