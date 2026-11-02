@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { autoRescheduleWeek } from "./autoReschedule.js";
 import { createLocalBackup, LOCAL_DATA_KEYS, parseLocalBackup } from "./localBackup.js";
 import {
   DEFAULT_MARATHON_GOAL_PACE,
@@ -258,25 +259,53 @@ function getWorkoutForDate(date, weekRow, lockReason = "", goalPace = PROFILE.ma
   return { title: "Long easy outing", type: "Long easy", distance, note: foundation ? "Run-walk at conversational effort. Finish with energy in reserve." : "Easy endurance outing; practice familiar fluids and fueling as duration increases.", locked: false };
 }
 
-function getCalendarWorkoutForDate(date, checkIns, recoveryDates, goalPace) {
+function getCalendarWeekSchedule(week, activities, checkIns, recoveryDates, goalPace, today) {
+  const weekRow = TRAINING_PLAN[week - 1];
+  if (!weekRow) return null;
+  const checkIn = checkIns[String(week)];
+  const hipLock = Boolean(checkIn && checkIn.status !== "AMAN");
+  const workouts = Array.from({ length: 7 }, (_, index) => {
+    const date = addDays(weekRow.start, index);
+    const dateIso = toLocalISODate(date);
+    const lockReason = hipLock
+      ? `Hip check-in is ${checkIn.status}: use Rest / Recovery for the full week and cap planned volume at 75%.`
+      : recoveryDates.includes(dateIso)
+        ? "A recent activity was faster than the easy-pace guardrail. This date is reserved for recovery; do not replace it with another workout."
+        : "";
+    return {
+      date: dateIso,
+      workout: getWorkoutForDate(date, weekRow, "", goalPace),
+      lockReason,
+    };
+  });
+  return {
+    ...autoRescheduleWeek({
+      workouts,
+      activities,
+      weeklyTarget: weekRow.targetVolume,
+      volumeCap: round1(weekRow.targetVolume * (hipLock ? 0.75 : 1)),
+      today: toLocalISODate(today),
+    }),
+    hipLock,
+  };
+}
+
+function getCalendarWorkoutForDate(date, scheduleByWeek) {
   const planEnd = TRAINING_PLAN[TOTAL_WEEKS - 1].end;
   const dateIso = toLocalISODate(date);
   if (dateIso < toLocalISODate(PLAN_START) || dateIso > toLocalISODate(planEnd)) return null;
 
   const week = getPlanWeekForDate(date);
   const weekRow = TRAINING_PLAN[week - 1];
-  const checkIn = checkIns[String(week)];
-  const lockReason = checkIn && checkIn.status !== "AMAN"
-    ? `Hip check-in is ${checkIn.status}: use Rest / Recovery for the full week and cap planned volume at 75%.`
-    : recoveryDates.includes(toLocalISODate(date))
-      ? "A recent activity was faster than the easy-pace guardrail. This date is reserved for recovery; do not replace it with another workout."
-      : "";
-
+  const reschedule = scheduleByWeek.get(week);
+  const session = reschedule?.schedule.find((entry) => entry.date === dateIso);
   return {
     week,
     weekRow,
-    hipLock: Boolean(checkIn && checkIn.status !== "AMAN"),
-    workout: getWorkoutForDate(date, weekRow, lockReason, goalPace),
+    hipLock: Boolean(reschedule?.hipLock),
+    workout: session?.workout || getWorkoutForDate(date, weekRow),
+    session,
+    reschedule,
   };
 }
 
@@ -501,13 +530,15 @@ export default function App() {
         : new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), day);
     });
   }, [calendarMonth]);
+  const calendarScheduleByWeek = useMemo(() => {
+    const weeks = new Set(calendarCells.filter(Boolean).map(getPlanWeekForDate));
+    return new Map([...weeks].map((week) => [
+      week,
+      getCalendarWeekSchedule(week, activities, checkIns, recoveryDates, marathonGoalPace, today),
+    ]));
+  }, [calendarCells, activities, checkIns, recoveryDates, marathonGoalPace, today]);
   const selectedCalendarDateObject = new Date(`${selectedCalendarDate}T12:00:00`);
-  const selectedCalendarEntry = getCalendarWorkoutForDate(
-    selectedCalendarDateObject,
-    checkIns,
-    recoveryDates,
-    marathonGoalPace,
-  );
+  const selectedCalendarEntry = getCalendarWorkoutForDate(selectedCalendarDateObject, calendarScheduleByWeek);
   const calculatedPace = useMemo(() => {
     const distance = Number(activityForm.distance);
     const duration = Number(activityForm.duration);
@@ -811,6 +842,13 @@ export default function App() {
     Rest: "border-slate-800 bg-slate-900 text-slate-500",
     Race: "border-fuchsia-900/70 bg-fuchsia-950/50 text-fuchsia-300",
     Shakeout: "border-emerald-900/70 bg-emerald-950/50 text-emerald-300",
+  };
+  const rescheduleStatusLabel = {
+    completed: "Completed",
+    shifted: "Rescheduled",
+    dropped: "Dropped",
+    "fatigue-adjusted": "Eased for fatigue signal",
+    "safety-blocked": "Safety lock",
   };
 
   return (
@@ -1138,7 +1176,7 @@ export default function App() {
 
           <Panel
             title="Monthly training calendar"
-            subtitle="Daily sessions come from the 157-week plan. Select a day for workout details; saved hip check-ins and recovery locks override the planned session."
+            subtitle="Daily sessions adapt from recorded manual or Strava runs. Missed runs move only to a later open day within the same week; rest, strength, recovery, hip locks, and weekly volume caps remain protected."
             action={(
               <div className="flex items-center gap-2">
                 <button
@@ -1194,7 +1232,7 @@ export default function App() {
                 {calendarCells.map((date, index) => {
                   if (!date) return <div key={`empty-${index}`} className="min-h-20 rounded-lg sm:min-h-24" aria-hidden="true" />;
                   const dateIso = toLocalISODate(date);
-                  const entry = getCalendarWorkoutForDate(date, checkIns, recoveryDates, marathonGoalPace);
+                  const entry = getCalendarWorkoutForDate(date, calendarScheduleByWeek);
                   const selected = dateIso === selectedCalendarDate;
                   return (
                     <button
@@ -1210,6 +1248,9 @@ export default function App() {
                         {entry ? entry.workout.locked ? "Recovery lock" : entry.workout.title : "Outside plan"}
                       </span>
                       {entry && entry.workout.distance > 0 ? <span className="mt-0.5 block text-[10px] opacity-70">{entry.workout.distance.toFixed(1)} km</span> : null}
+                      {entry?.session?.flags.length
+                        ? <span className="mt-0.5 block truncate text-[9px] font-semibold uppercase tracking-wide">{rescheduleStatusLabel[entry.session.status] || entry.session.status}</span>
+                        : null}
                     </button>
                   );
                 })}
@@ -1228,6 +1269,21 @@ export default function App() {
                     <Badge tone={selectedCalendarEntry.workout.locked ? "amber" : "slate"}>{selectedCalendarEntry.workout.type.toUpperCase()}</Badge>
                   </div>
                   <p className="mt-2 text-sm leading-6 text-slate-300">{selectedCalendarEntry.workout.note}</p>
+                  {selectedCalendarEntry.session?.reasons.length
+                    ? <div className="mt-3 rounded-lg border border-slate-800 bg-slate-900/70 p-3">
+                      <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                        Schedule reasoning · {rescheduleStatusLabel[selectedCalendarEntry.session.status] || selectedCalendarEntry.session.status}
+                      </div>
+                      <ul className="mt-1 space-y-1 text-xs leading-5 text-slate-300">
+                        {selectedCalendarEntry.session.reasons.map((reason, index) => <li key={`${selectedCalendarEntry.session.date}-${index}`}>{reason}</li>)}
+                      </ul>
+                    </div>
+                    : null}
+                  {selectedCalendarEntry.reschedule?.pace.fatigueRisk
+                    ? <p className="mt-2 text-xs leading-5 text-amber-300">
+                      Fatigue planning signal: weekly average {formatPace(selectedCalendarEntry.reschedule.pace.weeklyAveragePace)} min/km versus historical baseline {formatPace(selectedCalendarEntry.reschedule.pace.baselinePace)} min/km (at least 10% slower). This is a conservative planning heuristic, not clinical fatigue or overtraining detection.
+                    </p>
+                    : null}
                   <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-400">
                     <span>Session: <strong className="text-slate-200">{selectedCalendarEntry.workout.distance.toFixed(1)} km</strong></span>
                     {selectedCalendarEntry.workout.distance > 0 && selectedCalendarEntry.workout.type !== "Quality"
@@ -1236,6 +1292,10 @@ export default function App() {
                         ? <span>Total duration varies with the optional quality segment.</span>
                         : null}
                     <span>Weekly cap: {round1(selectedCalendarEntry.weekRow.targetVolume * (selectedCalendarEntry.hipLock ? 0.75 : 1)).toFixed(1)} km{selectedCalendarEntry.hipLock ? " (75% hip-status cap)" : ""}</span>
+                    <span>Recorded this week: {selectedCalendarEntry.reschedule?.weeklyDistance.toFixed(1)} km</span>
+                    {selectedCalendarEntry.reschedule?.pace.weeklyAveragePace !== null
+                      ? <span>Weekly average pace: {formatPace(selectedCalendarEntry.reschedule.pace.weeklyAveragePace)} min/km</span>
+                      : null}
                   </div>
                 </>
               ) : (
@@ -1249,7 +1309,7 @@ export default function App() {
             </div>
           </Panel>
 
-          <Panel title="157-week marathon plan" subtitle="A fixed planning template generated from 02 November 2026 through 04 November 2029. In weeks 1–149, increases are capped at 10% and each fourth-week target at 82% of prior volume. These are planning heuristics, not injury-prevention evidence; the plan does not adapt to missed sessions or changes in fitness. The current row reflects any hip-related 25% volume reduction.">
+          <Panel title="157-week marathon plan" subtitle="A fixed planning template generated from 02 November 2026 through 04 November 2029. In weeks 1–149, increases are capped at 10% and each fourth-week target at 82% of prior volume. The calendar separately adapts missed sessions and a conservative pace-based fatigue signal; these are planning heuristics, not injury-prevention evidence. The current row reflects any hip-related 25% volume reduction.">
             <div className="mb-4 grid gap-3 sm:grid-cols-[1fr_260px]">
               <Field label="Search plan">
                 <input className={inputClass} type="search" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} />
