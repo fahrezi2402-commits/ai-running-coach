@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { createLocalBackup, LOCAL_DATA_KEYS, parseLocalBackup } from "./localBackup.js";
 
 /*
  * AI Running Coach — single-file React SPA
@@ -17,7 +18,6 @@ const TOTAL_WEEKS = 157;
 const EASY_PACE_MIN = 10 + 15 / 60; // faster-than-this is considered overpacing
 const EASY_PACE_MAX = 11;
 const PROFILE = { age: 26, heightCm: 170, weightKg: 65 };
-const PROFILE_BMI = PROFILE.weightKg / Math.pow(PROFILE.heightCm / 100, 2);
 
 const PHASES = [
   { id: 1, start: 1, end: 26, name: "Foundation & Run-Walk", focus: "Build a consistent, injury-aware running habit." },
@@ -348,10 +348,13 @@ export default function App() {
   const tomorrowWeek = getPlanWeekForDate(tomorrow);
   const tomorrowWeekRow = TRAINING_PLAN[tomorrowWeek - 1];
 
-  const [activities, setActivities] = useLocalStorageState("ai-running-coach:activities", []);
-  const [checkIns, setCheckIns] = useLocalStorageState("ai-running-coach:hip-checkins", {});
-  const [recoveryDates, setRecoveryDates] = useLocalStorageState("ai-running-coach:recovery-dates", []);
-  const [guardrailEvents, setGuardrailEvents] = useLocalStorageState("ai-running-coach:guardrail-events", []);
+  const [activities, setActivities] = useLocalStorageState(LOCAL_DATA_KEYS.activities, []);
+  const [checkIns, setCheckIns] = useLocalStorageState(LOCAL_DATA_KEYS.checkIns, {});
+  const [recoveryDates, setRecoveryDates] = useLocalStorageState(LOCAL_DATA_KEYS.recoveryDates, []);
+  const [guardrailEvents, setGuardrailEvents] = useLocalStorageState(LOCAL_DATA_KEYS.guardrailEvents, []);
+  const [profile, setProfile] = useLocalStorageState(LOCAL_DATA_KEYS.profile, PROFILE);
+  const [weightInput, setWeightInput] = useState(String(profile.weightKg));
+  const [backupMessage, setBackupMessage] = useState("");
   const [activityForm, setActivityForm] = useState({ distance: "", duration: "", heartRate: "" });
   const [logFeedback, setLogFeedback] = useState(null);
   const [hipForm, setHipForm] = useState({ clicking: "No", painScore: 0, symptoms: "" });
@@ -383,6 +386,11 @@ export default function App() {
   const tomorrowDurationRange = tomorrowWorkout.distance > 0
     ? `${formatDuration(tomorrowWorkout.distance * EASY_PACE_MIN)} – ${formatDuration(tomorrowWorkout.distance * EASY_PACE_MAX)}`
     : "No running duration prescribed";
+  const parsedWeightKg = Number(weightInput);
+  const isWeightValid = weightInput.trim() !== "" && Number.isFinite(parsedWeightKg) && parsedWeightKg > 0;
+  const profileBMI = isWeightValid
+    ? parsedWeightKg / Math.pow(profile.heightCm / 100, 2)
+    : null;
 
   useEffect(() => {
     let active = true;
@@ -455,8 +463,8 @@ export default function App() {
     if (tomorrowWorkout.type === "Quality") {
       return "Keep the easy portions genuinely easy. The controlled segment is optional and should feel comfortably controlled, never like a race. Stop if pain changes your stride.";
     }
-    return `At age ${PROFILE.age}, ${PROFILE.heightCm} cm, and ${PROFILE.weightKg} kg (BMI ${PROFILE_BMI.toFixed(1)}), the priority is repeatable training rather than pace-chasing. Use the talk test, especially in warm or humid conditions; maintain two light strength sessions when recovered, and protect sleep and fueling. BMI is context only, not a performance target.`;
-  }, [tomorrowWorkout, tomorrowHipLock, tomorrowPaceLock]);
+    return `At age ${profile.age}, ${profile.heightCm} cm, and ${profile.weightKg} kg (BMI ${(profile.weightKg / Math.pow(profile.heightCm / 100, 2)).toFixed(1)}), the priority is repeatable training rather than pace-chasing. Use the talk test, especially in warm or humid conditions; maintain two light strength sessions when recovered, and protect sleep and fueling. BMI is context only, not a performance target.`;
+  }, [tomorrowWorkout, tomorrowHipLock, tomorrowPaceLock, profile]);
 
   function handleActivitySubmit(event) {
     event.preventDefault();
@@ -508,7 +516,7 @@ export default function App() {
       setGuardrailEvents((current) => [eventRecord, ...current].slice(0, 20));
       setLogFeedback({
         tone: "amber",
-        text: `Overpacing detected: ${formatPace(pace)} min/km is faster than this week's ${formatPace(activeWeekRow.easyPaceMin)} min/km easy-pace limit. Tomorrow (${formatDate(tomorrow)}) is now locked to Rest / Recovery.`,
+        text: `Pace guardrail triggered: ${formatPace(pace)} min/km is faster than this week's ${formatPace(activeWeekRow.easyPaceMin)} min/km easy-pace limit. Tomorrow (${formatDate(tomorrow)}) is now locked to Rest / Recovery.`,
       });
     } else if (pace > activeWeekRow.easyPaceMax) {
       setLogFeedback({
@@ -541,6 +549,60 @@ export default function App() {
       setHipFeedback("Status WASPADA. The active week's running is locked to Rest / Recovery and its volume cap is reduced by 25%. Recheck symptoms before resuming structured running.");
     } else {
       setHipFeedback("Status PERIKSA. The active week's running is locked to Rest / Recovery and its volume cap is reduced by 25%. Arrange an assessment with a qualified sports-health clinician before returning to running.");
+    }
+  }
+
+  function exportLocalBackup() {
+    const backup = createLocalBackup({ activities, checkIns, recoveryDates, guardrailEvents, profile });
+    const fileUrl = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = fileUrl;
+    link.download = `ai-running-coach-backup-${toLocalISODate(today)}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(fileUrl), 0);
+    setBackupMessage("Local training records and profile exported. Strava connection cookies are not included.");
+  }
+
+  async function importLocalBackup(event) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    try {
+      const data = parseLocalBackup(await file.text());
+      if (!window.confirm("Importing this backup replaces the local activities, check-ins, recovery dates, guardrail history, and training profile in this browser. Continue?")) {
+        setBackupMessage("Backup import cancelled; existing local data was not changed.");
+        return;
+      }
+
+      const entries = Object.entries(LOCAL_DATA_KEYS).map(([field, key]) => [key, data[field]]);
+      const previousValues = entries.map(([key]) => window.localStorage.getItem(key));
+      try {
+        entries.forEach(([key, value]) => window.localStorage.setItem(key, JSON.stringify(value)));
+      } catch (error) {
+        try {
+          entries.forEach(([key], index) => {
+            const previousValue = previousValues[index];
+            if (previousValue === null) window.localStorage.removeItem(key);
+            else window.localStorage.setItem(key, previousValue);
+          });
+        } catch (rollbackError) {
+          console.error("Unable to fully restore LocalStorage after a failed backup import.", rollbackError);
+        }
+        throw new Error("The backup could not be saved to this browser's storage. Existing data was restored where possible.");
+      }
+
+      setActivities(data.activities);
+      setCheckIns(data.checkIns);
+      setRecoveryDates(data.recoveryDates);
+      setGuardrailEvents(data.guardrailEvents);
+      setProfile(data.profile);
+      setWeightInput(String(data.profile.weightKg));
+      setBackupMessage("Backup imported. The previous local records and profile were replaced.");
+    } catch (error) {
+      setBackupMessage(error instanceof Error ? error.message : "The backup could not be imported.");
+    } finally {
+      input.value = "";
     }
   }
 
@@ -611,7 +673,7 @@ export default function App() {
             }));
           return [...newEvents, ...current].slice(0, 20);
         });
-        setStravaMessage(`Imported ${newActivities.length} new ${newActivities.length === 1 ? "run" : "runs"}. Today's Strava run exceeded the easy-pace limit, so tomorrow is locked to recovery.`);
+        setStravaMessage(`Imported ${newActivities.length} new ${newActivities.length === 1 ? "run" : "runs"}. Today's Strava run was faster than the app's easy-pace threshold, so tomorrow is locked to recovery.`);
       } else {
         setStravaMessage(newActivities.length
           ? `Imported ${newActivities.length} recent Strava ${newActivities.length === 1 ? "run" : "runs"}. Imported activities are saved in this browser.`
@@ -708,7 +770,7 @@ export default function App() {
 
           <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
             <Panel
-              title="Daily AI Coach Recommendation"
+              title="Daily rule-based coaching note"
               subtitle={`Tomorrow’s workout · ${formatDate(tomorrow, { weekday: "long", day: "2-digit", month: "long" })} · Week ${tomorrowWeek} · ${tomorrowWeekRow.phase}`}
               action={tomorrowWorkout.locked ? <Badge tone="amber">RECOVERY LOCK</Badge> : <Badge tone="emerald">COACH PLAN</Badge>}
               className="border-emerald-900/50 bg-gradient-to-br from-slate-900 to-slate-900/80"
@@ -749,12 +811,34 @@ export default function App() {
 
             <Panel title="Training profile" subtitle="Biometrics used as context for conservative coaching advice.">
               <div className="grid grid-cols-3 gap-2">
-                <div className="rounded-xl bg-slate-950 p-3"><div className="text-xs text-slate-500">Age</div><div className="mt-1 text-xl font-bold">{PROFILE.age}</div><div className="text-xs text-slate-500">years</div></div>
-                <div className="rounded-xl bg-slate-950 p-3"><div className="text-xs text-slate-500">Height</div><div className="mt-1 text-xl font-bold">{PROFILE.heightCm}</div><div className="text-xs text-slate-500">cm</div></div>
-                <div className="rounded-xl bg-slate-950 p-3"><div className="text-xs text-slate-500">Weight</div><div className="mt-1 text-xl font-bold">{PROFILE.weightKg}</div><div className="text-xs text-slate-500">kg</div></div>
+                <div className="rounded-xl bg-slate-950 p-3"><div className="text-xs text-slate-500">Age</div><div className="mt-1 text-xl font-bold">{profile.age}</div><div className="text-xs text-slate-500">years</div></div>
+                <div className="rounded-xl bg-slate-950 p-3"><div className="text-xs text-slate-500">Height</div><div className="mt-1 text-xl font-bold">{profile.heightCm}</div><div className="text-xs text-slate-500">cm</div></div>
+                <div className="rounded-xl bg-slate-950 p-3">
+                  <label htmlFor="profile-weight" className="text-xs text-slate-500">Weight</label>
+                  <input
+                    id="profile-weight"
+                    className={`${inputClass} mt-1 text-xl font-bold`}
+                    type="number"
+                    inputMode="decimal"
+                    step="any"
+                    value={weightInput}
+                    aria-invalid={!isWeightValid}
+                    aria-describedby={isWeightValid ? undefined : "profile-weight-hint"}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setWeightInput(value);
+                      const weightKg = Number(value);
+                      if (value.trim() !== "" && Number.isFinite(weightKg) && weightKg > 0) {
+                        setProfile((current) => ({ ...current, weightKg }));
+                      }
+                    }}
+                  />
+                  <div className="text-xs text-slate-500">kg</div>
+                  {!isWeightValid ? <div id="profile-weight-hint" className="mt-1 text-xs text-amber-300">Enter a weight greater than 0 kg.</div> : null}
+                </div>
               </div>
               <div className="mt-4 flex items-center justify-between rounded-xl border border-slate-800 p-3">
-                <div><div className="text-xs text-slate-500">Calculated BMI</div><div className="mt-1 text-xl font-semibold text-slate-100">{PROFILE_BMI.toFixed(1)}</div></div>
+                <div><div className="text-xs text-slate-500">Calculated BMI</div><div className="mt-1 text-xl font-semibold text-slate-100">{profileBMI === null ? "—" : profileBMI.toFixed(1)}</div></div>
                 <Badge tone="slate">Context only</Badge>
               </div>
               <p className="mt-4 text-xs leading-5 text-slate-500">BMI does not determine running pace, readiness, or injury risk. Pace targets should be reassessed with training evidence and qualified coaching input, not automatically accelerated.</p>
@@ -874,7 +958,7 @@ export default function App() {
                   </Field>
                 </div>
                 <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-xs leading-5 text-slate-400">
-                  Pace guardrail: any logged pace faster than <span className="font-semibold text-emerald-300">{formatPace(activeWeekRow.easyPaceMin)} min/km</span> triggers an overpacing alert and automatically reserves tomorrow for recovery.
+                  Pace guardrail: a recorded average faster than <span className="font-semibold text-emerald-300">{formatPace(activeWeekRow.easyPaceMin)} min/km</span> triggers tomorrow's recovery lock. This fixed planning rule is a conservative prompt, not a medical assessment or injury prediction.
                 </div>
                 <button type="submit" className={buttonClass}>Save activity & check pace</button>
               </form>
@@ -927,7 +1011,18 @@ export default function App() {
             </Panel>
           </section>
 
-          <Panel title="157-week marathon plan" subtitle="Generated from 02 November 2026 through 04 November 2029. Search by week, date, phase, volume, pace, or workout note; filter by phase. The current row reflects any hip-related 25% volume reduction.">
+          <Panel title="Local data backup" subtitle="Export or restore this browser's training records and profile. Imports replace the current local records.">
+            <div className="flex flex-wrap items-end gap-4">
+              <button type="button" className={secondaryButtonClass} onClick={exportLocalBackup}>Export backup JSON</button>
+              <Field label="Import backup JSON" hint="Only validated AI Running Coach backup files, schema version 1, are accepted.">
+                <input className={inputClass} type="file" accept=".json,application/json" onChange={importLocalBackup} />
+              </Field>
+            </div>
+            {backupMessage ? <p role="status" className="mt-3 rounded-xl border border-slate-800 bg-slate-950 p-3 text-sm leading-6 text-slate-300">{backupMessage}</p> : null}
+            <p className="mt-3 text-xs leading-5 text-slate-500">Backups contain activity records, hip check-ins, recovery dates, pace alerts, and your profile. Strava session cookies are not exportable. Keep backup files private; they may contain personal training information.</p>
+          </Panel>
+
+          <Panel title="157-week marathon plan" subtitle="A fixed planning template generated from 02 November 2026 through 04 November 2029. In weeks 1–149, increases are capped at 10% and each fourth-week target at 82% of prior volume. These are planning heuristics, not injury-prevention evidence; the plan does not adapt to missed sessions or changes in fitness. The current row reflects any hip-related 25% volume reduction.">
             <div className="mb-4 grid gap-3 sm:grid-cols-[1fr_260px]">
               <Field label="Search plan">
                 <input className={inputClass} type="search" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} />
@@ -986,7 +1081,7 @@ export default function App() {
 
           <footer className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 text-xs leading-6 text-slate-500">
             <div className="font-semibold text-slate-300">Coaching and safety notes</div>
-            This is a planning and logging tool, not a medical device or a substitute for an individualized assessment. The 157-week mileage progression is a conservative template, not a validated prescription for every runner. Do not progress through pain, persistent fatigue, altered gait, or illness. The pace range is a locked starting guardrail rather than a universal physiological zone; reassess it using observed effort and qualified coaching input. Seek prompt medical care for severe pain, inability to bear weight, significant swelling, or other concerning symptoms. All app records are stored in this browser only and may be cleared by the browser's site-data controls.
+            This is a planning and logging tool, not a medical device or a substitute for an individualized assessment. Coaching notes and pace/recovery guardrails are deterministic planning rules, not AI-generated advice, clinically validated injury predictions, or universal physiological zones. The 157-week mileage progression is a fixed template, not a validated prescription for every runner, and does not adapt to missed sessions or changes in fitness. Do not progress through pain, persistent fatigue, altered gait, or illness. Reassess the pace range using observed effort and qualified coaching input. Seek prompt medical care for severe pain, inability to bear weight, significant swelling, or other concerning symptoms. Records remain in this browser unless you explicitly connect Strava to import activities; browser site-data controls can clear them.
           </footer>
         </main>
       </div>
