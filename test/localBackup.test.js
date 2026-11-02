@@ -34,7 +34,7 @@ const sampleData = {
     limit: "10:15",
     distance: 5,
   }],
-  profile: { age: 26, heightCm: 170, weightKg: 65 },
+  profile: { age: 26, heightCm: 170, weightKg: 65, marathonGoalPace: 7.5 },
 };
 
 test("local backup round-trips the versioned profile and training records", () => {
@@ -64,4 +64,18 @@ test("local backup rejects missing or unsupported data fields", () => {
   const invalidBackup = createLocalBackup({ ...sampleData, profile: undefined });
 
   assert.throws(() => parseLocalBackup(JSON.stringify(invalidBackup)), /missing required local data/);
+});
+
+test("local backup accepts older profiles and validates an optional marathon goal pace", () => {
+  const olderProfile = { age: 26, heightCm: 170, weightKg: 65 };
+  assert.deepEqual(
+    parseLocalBackup(JSON.stringify(createLocalBackup({ ...sampleData, profile: olderProfile }))).profile,
+    olderProfile,
+  );
+
+  const invalidBackup = createLocalBackup({
+    ...sampleData,
+    profile: { ...sampleData.profile, marathonGoalPace: 4 },
+  });
+  assert.throws(() => parseLocalBackup(JSON.stringify(invalidBackup)), /invalid training profile/);
 });

@@ -1,5 +1,11 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createLocalBackup, LOCAL_DATA_KEYS, parseLocalBackup } from "./localBackup.js";
+import {
+  DEFAULT_MARATHON_GOAL_PACE,
+  marathonTimeAtPace,
+  parsePaceInput,
+  suggestedQualityPaceForWeek,
+} from "./paceProgression.js";
 
 /*
  * AI Running Coach — single-file React SPA
@@ -17,7 +23,7 @@ const PLAN_START = new Date(2026, 10, 2); // Monday, 02 November 2026 (local tim
 const TOTAL_WEEKS = 157;
 const EASY_PACE_MIN = 10 + 15 / 60; // faster-than-this is considered overpacing
 const EASY_PACE_MAX = 11;
-const PROFILE = { age: 26, heightCm: 170, weightKg: 65 };
+const PROFILE = { age: 26, heightCm: 170, weightKg: 65, marathonGoalPace: DEFAULT_MARATHON_GOAL_PACE };
 
 const PHASES = [
   { id: 1, start: 1, end: 26, name: "Foundation & Run-Walk", focus: "Build a consistent, injury-aware running habit." },
@@ -57,7 +63,7 @@ function trendVolumeForWeek(week) {
   return 0;
 }
 
-function qualityNoteForWeek(week, phase) {
+function qualityNoteForWeek(week, phase, goalPace = PROFILE.marathonGoalPace) {
   if (week === 155) return "Goal marathon week: follow the rehearsed pacing and fueling plan; walk aid stations as needed.";
   if (week >= 156) return "Recovery only: walking and gentle mobility as comfortable; no workout or mileage target is required.";
   if (week >= 150) {
@@ -105,7 +111,11 @@ function qualityNoteForWeek(week, phase) {
     ],
   };
   const choices = notesByPhase[phase.id] || ["Easy aerobic running; keep effort controlled and recovery complete."];
-  return choices[(week - phase.start) % choices.length];
+  const qualityNote = choices[(week - phase.start) % choices.length];
+  const suggestedPace = suggestedQualityPaceForWeek(week, goalPace);
+  return suggestedPace === null
+    ? qualityNote
+    : `${qualityNote} Optional steady-segment suggestion: ${formatPace(suggestedPace)} min/km if symptom-free and recovered; skip it if effort is not comfortably controlled. This is not an easy-run pace or a required target.`;
 }
 
 function createTrainingPlan() {
@@ -208,7 +218,7 @@ function getRunDistanceForDate(date, weekRow) {
   return round1(weekRow.targetVolume * share);
 }
 
-function getWorkoutForDate(date, weekRow, lockReason = "") {
+function getWorkoutForDate(date, weekRow, lockReason = "", goalPace = PROFILE.marathonGoalPace) {
   if (lockReason) {
     return {
       title: "Rest / Recovery — locked",
@@ -237,9 +247,37 @@ function getWorkoutForDate(date, weekRow, lockReason = "") {
   if (day === 5) return { title: "Rest day", type: "Rest", distance: 0, note: "Prioritize sleep, hydration, and normal daily movement. No make-up mileage.", locked: false };
   if (day === 6 && foundation) return { title: "Strength / easy walk", type: "Cross-training", distance: 0, note: "Optional low-impact walk and brief strength routine; keep the legs fresh for the long outing.", locked: false };
   if (day === 2) return { title: foundation ? "Easy run-walk" : "Easy aerobic run", type: "Easy", distance, note: "Stay inside the locked easy-pace range and use the talk test. Walk breaks are planned, not a failure.", locked: false };
-  if (day === 4) return { title: foundation ? "Easy run-walk" : "Easy + controlled quality", type: foundation ? "Easy" : "Quality", distance, note: foundation ? "Comfortable run-walk only; no intervals or pace targets." : weekRow.qualityNote, locked: false };
+  if (day === 4) return {
+    title: foundation ? "Easy run-walk" : "Easy + controlled quality",
+    type: foundation ? "Easy" : "Quality",
+    distance,
+    note: foundation ? "Comfortable run-walk only; no intervals or pace targets." : qualityNoteForWeek(weekRow.week, phaseForWeek(weekRow.week), goalPace),
+    locked: false,
+  };
   if (day === 6) return { title: "Easy aerobic run", type: "Easy", distance, note: "Relaxed effort. Keep this shorter than the long outing and avoid adding distance to compensate for missed sessions.", locked: false };
   return { title: "Long easy outing", type: "Long easy", distance, note: foundation ? "Run-walk at conversational effort. Finish with energy in reserve." : "Easy endurance outing; practice familiar fluids and fueling as duration increases.", locked: false };
+}
+
+function getCalendarWorkoutForDate(date, checkIns, recoveryDates, goalPace) {
+  const planEnd = TRAINING_PLAN[TOTAL_WEEKS - 1].end;
+  const dateIso = toLocalISODate(date);
+  if (dateIso < toLocalISODate(PLAN_START) || dateIso > toLocalISODate(planEnd)) return null;
+
+  const week = getPlanWeekForDate(date);
+  const weekRow = TRAINING_PLAN[week - 1];
+  const checkIn = checkIns[String(week)];
+  const lockReason = checkIn && checkIn.status !== "AMAN"
+    ? `Hip check-in is ${checkIn.status}: use Rest / Recovery for the full week and cap planned volume at 75%.`
+    : recoveryDates.includes(toLocalISODate(date))
+      ? "A recent activity was faster than the easy-pace guardrail. This date is reserved for recovery; do not replace it with another workout."
+      : "";
+
+  return {
+    week,
+    weekRow,
+    hipLock: Boolean(checkIn && checkIn.status !== "AMAN"),
+    workout: getWorkoutForDate(date, weekRow, lockReason, goalPace),
+  };
 }
 
 function assessHipStatus({ clicking, painScore, symptoms }) {
@@ -354,6 +392,8 @@ export default function App() {
   const [guardrailEvents, setGuardrailEvents] = useLocalStorageState(LOCAL_DATA_KEYS.guardrailEvents, []);
   const [profile, setProfile] = useLocalStorageState(LOCAL_DATA_KEYS.profile, PROFILE);
   const [weightInput, setWeightInput] = useState(String(profile.weightKg));
+  const [goalPaceInput, setGoalPaceInput] = useState(formatPace(profile.marathonGoalPace ?? DEFAULT_MARATHON_GOAL_PACE));
+  const [goalPaceFeedback, setGoalPaceFeedback] = useState("");
   const [backupMessage, setBackupMessage] = useState("");
   const [activityForm, setActivityForm] = useState({ distance: "", duration: "", heartRate: "" });
   const [logFeedback, setLogFeedback] = useState(null);
@@ -369,6 +409,8 @@ export default function App() {
   const [stravaMessage, setStravaMessage] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [phaseFilter, setPhaseFilter] = useState("all");
+  const [calendarMonth, setCalendarMonth] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1));
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => toLocalISODate(today));
 
   const activeCheckIn = checkIns[String(activeWeek)] || null;
   const tomorrowCheckIn = checkIns[String(tomorrowWeek)] || null;
@@ -380,7 +422,8 @@ export default function App() {
     : tomorrowPaceLock
       ? "A recent activity was faster than the easy-pace guardrail. Tomorrow is reserved for recovery; do not replace it with another workout."
       : "";
-  const tomorrowWorkout = getWorkoutForDate(tomorrow, tomorrowWeekRow, tomorrowLockReason);
+  const marathonGoalPace = profile.marathonGoalPace ?? DEFAULT_MARATHON_GOAL_PACE;
+  const tomorrowWorkout = getWorkoutForDate(tomorrow, tomorrowWeekRow, tomorrowLockReason, marathonGoalPace);
   const activeVolume = round1(activeWeekRow.targetVolume * (activeHipLock ? 0.75 : 1));
   const tomorrowVolume = round1(tomorrowWeekRow.targetVolume * (tomorrowHipLock ? 0.75 : 1));
   const tomorrowDurationRange = tomorrowWorkout.distance > 0
@@ -446,6 +489,25 @@ export default function App() {
   }, [activeWeek, activeCheckIn]);
 
   const liveHipStatus = assessHipStatus(hipForm);
+  const calendarCells = useMemo(() => {
+    const firstOfMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1);
+    const mondayOffset = (firstOfMonth.getDay() + 6) % 7;
+    const dayCount = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 0).getDate();
+    const cellCount = Math.ceil((mondayOffset + dayCount) / 7) * 7;
+    return Array.from({ length: cellCount }, (_, index) => {
+      const day = index - mondayOffset + 1;
+      return day < 1 || day > dayCount
+        ? null
+        : new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), day);
+    });
+  }, [calendarMonth]);
+  const selectedCalendarDateObject = new Date(`${selectedCalendarDate}T12:00:00`);
+  const selectedCalendarEntry = getCalendarWorkoutForDate(
+    selectedCalendarDateObject,
+    checkIns,
+    recoveryDates,
+    marathonGoalPace,
+  );
   const calculatedPace = useMemo(() => {
     const distance = Number(activityForm.distance);
     const duration = Number(activityForm.duration);
@@ -598,12 +660,27 @@ export default function App() {
       setGuardrailEvents(data.guardrailEvents);
       setProfile(data.profile);
       setWeightInput(String(data.profile.weightKg));
+      const importedGoalPace = data.profile.marathonGoalPace ?? DEFAULT_MARATHON_GOAL_PACE;
+      setGoalPaceInput(formatPace(importedGoalPace));
+      setGoalPaceFeedback("");
       setBackupMessage("Backup imported. The previous local records and profile were replaced.");
     } catch (error) {
       setBackupMessage(error instanceof Error ? error.message : "The backup could not be imported.");
     } finally {
       input.value = "";
     }
+  }
+
+  function saveMarathonGoalPace(event) {
+    event.preventDefault();
+    const pace = parsePaceInput(goalPaceInput);
+    if (pace === null) {
+      setGoalPaceFeedback("Enter a pace from 05:00 to 15:00 min/km, for example 07:30.");
+      return;
+    }
+
+    setProfile((current) => ({ ...current, marathonGoalPace: pace }));
+    setGoalPaceFeedback("Goal pace saved. Monthly quality suggestions update; easy-run guidance stays unchanged.");
   }
 
   async function connectStrava() {
@@ -713,15 +790,28 @@ export default function App() {
         row.phase,
         row.targetVolume,
         `${formatPace(row.easyPaceMin)}-${formatPace(row.easyPaceMax)}`,
-        row.qualityNote,
+        formatPace(suggestedQualityPaceForWeek(row.week, marathonGoalPace) || 0),
+        qualityNoteForWeek(row.week, phaseForWeek(row.week), marathonGoalPace),
       ].join(" ").toLowerCase();
       return searchable.includes(term);
     });
-  }, [searchTerm, phaseFilter]);
+  }, [searchTerm, phaseFilter, marathonGoalPace]);
 
   const recentActivities = activities.slice(0, 6);
   const currentPhase = phaseForWeek(activeWeek);
   const statusTone = (status) => status === "AMAN" ? "emerald" : status === "WASPADA" ? "amber" : status === "PERIKSA" ? "red" : "slate";
+  const calendarMonthLabel = new Intl.DateTimeFormat("en", { month: "long", year: "numeric" }).format(calendarMonth);
+  const calendarTypeTone = {
+    Easy: "border-emerald-900/70 bg-emerald-950/50 text-emerald-300",
+    Quality: "border-sky-900/70 bg-sky-950/50 text-sky-300",
+    "Long easy": "border-violet-900/70 bg-violet-950/50 text-violet-300",
+    Strength: "border-amber-900/70 bg-amber-950/50 text-amber-300",
+    "Cross-training": "border-amber-900/70 bg-amber-950/50 text-amber-300",
+    Recovery: "border-red-900/70 bg-red-950/50 text-red-300",
+    Rest: "border-slate-800 bg-slate-900 text-slate-500",
+    Race: "border-fuchsia-900/70 bg-fuchsia-950/50 text-fuchsia-300",
+    Shakeout: "border-emerald-900/70 bg-emerald-950/50 text-emerald-300",
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 selection:bg-emerald-400/30">
@@ -846,6 +936,30 @@ export default function App() {
                 <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Current phase focus</div>
                 <p className="mt-1 text-sm leading-6 text-slate-300">{currentPhase.focus}</p>
               </div>
+              <form onSubmit={saveMarathonGoalPace} className="mt-4 rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                <div className="space-y-1.5">
+                  <label htmlFor="marathon-goal-pace" className="block text-sm font-medium text-slate-300">Aspirational marathon goal pace</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="marathon-goal-pace"
+                      className={`${inputClass} max-w-36`}
+                      type="text"
+                      inputMode="numeric"
+                      value={goalPaceInput}
+                      aria-label="Marathon goal pace in minutes and seconds per kilometer"
+                      onChange={(event) => setGoalPaceInput(event.target.value)}
+                    />
+                    <span className="text-sm text-slate-400">min/km</span>
+                    <button type="submit" className={secondaryButtonClass}>Save</button>
+                  </div>
+                  <p className="text-xs leading-5 text-slate-500">Editable race-day aspiration, not a forecast or promise. It changes optional quality-session suggestions only; easy runs stay at the separate easy-pace range.</p>
+                </div>
+                <p className="mt-2 text-sm font-semibold text-sky-300">
+                  {formatPace(marathonGoalPace)} min/km · about {marathonTimeAtPace(marathonGoalPace)} for 42.195 km
+                </p>
+                {goalPaceFeedback ? <p role="status" className="mt-2 text-xs leading-5 text-slate-400">{goalPaceFeedback}</p> : null}
+                <p className="mt-2 text-xs leading-5 text-slate-500">Optional steady-segment suggestions move in four-week blocks from about 09:30/km toward this goal starting in week 53. Cutback, taper, and race weeks do not add pace work. Suggestions are never automatic workout requirements.</p>
+              </form>
             </Panel>
           </section>
 
@@ -1022,6 +1136,117 @@ export default function App() {
             <p className="mt-3 text-xs leading-5 text-slate-500">Backups contain activity records, hip check-ins, recovery dates, pace alerts, and your profile. Strava session cookies are not exportable. Keep backup files private; they may contain personal training information.</p>
           </Panel>
 
+          <Panel
+            title="Monthly training calendar"
+            subtitle="Daily sessions come from the 157-week plan. Select a day for workout details; saved hip check-ins and recovery locks override the planned session."
+            action={(
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className={secondaryButtonClass}
+                  aria-label="Previous month"
+                  onClick={() => {
+                    const month = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1);
+                    setCalendarMonth(month);
+                    setSelectedCalendarDate(toLocalISODate(month));
+                  }}
+                >
+                  Previous
+                </button>
+                <button
+                  type="button"
+                  className={secondaryButtonClass}
+                  aria-label="Next month"
+                  onClick={() => {
+                    const month = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1);
+                    setCalendarMonth(month);
+                    setSelectedCalendarDate(toLocalISODate(month));
+                  }}
+                >
+                  Next
+                </button>
+              </div>
+            )}
+          >
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <h3 className="text-xl font-semibold text-white">{calendarMonthLabel}</h3>
+              <div className="flex flex-wrap gap-2 text-xs text-slate-400">
+                {[
+                  ["Easy", "Easy"],
+                  ["Quality", "Quality"],
+                  ["Long easy", "Long easy"],
+                  ["Strength", "Strength"],
+                  ["Recovery", "Recovery"],
+                  ["Rest", "Rest"],
+                ].map(([type, label]) => (
+                  <span key={type} className={`rounded-lg border px-2 py-1 ${calendarTypeTone[type]}`}>{label}</span>
+                ))}
+              </div>
+            </div>
+            <div className="grid grid-cols-7 gap-1.5 sm:gap-2">
+              {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day) => (
+                <div key={day} className="px-1 py-2 text-center text-[10px] font-semibold uppercase tracking-wider text-slate-500 sm:text-xs">
+                  <span className="hidden sm:inline">{day}</span>
+                  <span className="sm:hidden">{day.slice(0, 3)}</span>
+                </div>
+              ))}
+              {calendarCells.map((date, index) => {
+                if (!date) return <div key={`empty-${index}`} className="min-h-20 rounded-lg sm:min-h-24" aria-hidden="true" />;
+                const dateIso = toLocalISODate(date);
+                const entry = getCalendarWorkoutForDate(date, checkIns, recoveryDates, marathonGoalPace);
+                const selected = dateIso === selectedCalendarDate;
+                return (
+                  <button
+                    key={dateIso}
+                    type="button"
+                    aria-label={`${formatDate(date, { weekday: "long", day: "numeric", month: "long", year: "numeric" })}: ${entry ? entry.workout.title : "outside plan period"}`}
+                    aria-pressed={selected}
+                    onClick={() => setSelectedCalendarDate(dateIso)}
+                    className={`min-h-20 rounded-lg border p-1.5 text-left transition hover:border-slate-500 sm:min-h-24 sm:p-2 ${selected ? "border-emerald-400 ring-1 ring-emerald-400/40" : "border-slate-800"} ${entry ? calendarTypeTone[entry.workout.type] || calendarTypeTone.Rest : "bg-slate-950/40 text-slate-600"}`}
+                  >
+                    <span className={`block text-xs font-semibold ${selected ? "text-white" : ""}`}>{date.getDate()}</span>
+                    <span className="mt-1 block truncate text-[10px] leading-4 sm:text-xs">
+                      {entry ? entry.workout.locked ? "Recovery lock" : entry.workout.title : "Outside plan"}
+                    </span>
+                    {entry && entry.workout.distance > 0 ? <span className="mt-0.5 block text-[10px] opacity-70">{entry.workout.distance.toFixed(1)} km</span> : null}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/70 p-4" aria-live="polite">
+              {selectedCalendarEntry ? (
+                <>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-xs uppercase tracking-wider text-slate-500">
+                        {formatDate(selectedCalendarDateObject, { weekday: "long", day: "2-digit", month: "long", year: "numeric" })} · Week {selectedCalendarEntry.week} · {selectedCalendarEntry.weekRow.phase}
+                      </div>
+                      <h4 className="mt-1 text-lg font-semibold text-white">{selectedCalendarEntry.workout.title}</h4>
+                    </div>
+                    <Badge tone={selectedCalendarEntry.workout.locked ? "amber" : "slate"}>{selectedCalendarEntry.workout.type.toUpperCase()}</Badge>
+                  </div>
+                  <p className="mt-2 text-sm leading-6 text-slate-300">{selectedCalendarEntry.workout.note}</p>
+                  <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-400">
+                    <span>Session: <strong className="text-slate-200">{selectedCalendarEntry.workout.distance.toFixed(1)} km</strong></span>
+                    {selectedCalendarEntry.workout.distance > 0 && selectedCalendarEntry.workout.type !== "Quality"
+                      ? <span>Easy-pace duration guide: {formatDuration(selectedCalendarEntry.workout.distance * EASY_PACE_MIN)}–{formatDuration(selectedCalendarEntry.workout.distance * EASY_PACE_MAX)}</span>
+                      : selectedCalendarEntry.workout.type === "Quality"
+                        ? <span>Total duration varies with the optional quality segment.</span>
+                        : null}
+                    <span>Weekly cap: {round1(selectedCalendarEntry.weekRow.targetVolume * (selectedCalendarEntry.hipLock ? 0.75 : 1)).toFixed(1)} km{selectedCalendarEntry.hipLock ? " (75% hip-status cap)" : ""}</span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h4 className="text-lg font-semibold text-white">
+                    {formatDate(selectedCalendarDateObject, { weekday: "long", day: "2-digit", month: "long", year: "numeric" })}
+                  </h4>
+                  <p className="mt-2 text-sm text-slate-400">This date is outside the plan period; no workout is prescribed.</p>
+                </>
+              )}
+            </div>
+          </Panel>
+
           <Panel title="157-week marathon plan" subtitle="A fixed planning template generated from 02 November 2026 through 04 November 2029. In weeks 1–149, increases are capped at 10% and each fourth-week target at 82% of prior volume. These are planning heuristics, not injury-prevention evidence; the plan does not adapt to missed sessions or changes in fitness. The current row reflects any hip-related 25% volume reduction.">
             <div className="mb-4 grid gap-3 sm:grid-cols-[1fr_260px]">
               <Field label="Search plan">
@@ -1036,7 +1261,7 @@ export default function App() {
             </div>
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
               <span>Showing {filteredPlan.length} of {TOTAL_WEEKS} weeks</span>
-              <span>Easy-pace baseline: {formatPace(EASY_PACE_MIN)}–{formatPace(EASY_PACE_MAX)} min/km · locked until reassessed</span>
+              <span>Easy pace: {formatPace(EASY_PACE_MIN)}–{formatPace(EASY_PACE_MAX)} min/km · separate from race goal pace</span>
             </div>
             <div className="max-h-[620px] overflow-auto rounded-xl border border-slate-800">
               <table className="w-full min-w-[900px] border-collapse text-left text-sm">
@@ -1047,6 +1272,7 @@ export default function App() {
                     <th className="px-3 py-3 font-semibold">Phase</th>
                     <th className="px-3 py-3 font-semibold">Target volume</th>
                     <th className="px-3 py-3 font-semibold">Easy pace</th>
+                    <th className="px-3 py-3 font-semibold">Optional quality pace</th>
                     <th className="px-3 py-3 font-semibold">Quality workout note</th>
                   </tr>
                 </thead>
@@ -1061,11 +1287,12 @@ export default function App() {
                         <td className="px-3 py-3 text-slate-300">{row.phase}</td>
                         <td className="whitespace-nowrap px-3 py-3 font-medium text-slate-200">{volume.toFixed(1)} km{isActive && activeHipLock ? <span className="ml-2 text-xs text-amber-300">−25%</span> : null}</td>
                         <td className="whitespace-nowrap px-3 py-3 text-emerald-300">{formatPace(row.easyPaceMin)}–{formatPace(row.easyPaceMax)}</td>
-                        <td className="max-w-xl px-3 py-3 leading-6 text-slate-400">{row.qualityNote}</td>
+                        <td className="whitespace-nowrap px-3 py-3 text-sky-300">{suggestedQualityPaceForWeek(row.week, marathonGoalPace) === null ? "—" : `${formatPace(suggestedQualityPaceForWeek(row.week, marathonGoalPace))} min/km`}</td>
+                        <td className="max-w-xl px-3 py-3 leading-6 text-slate-400">{qualityNoteForWeek(row.week, phaseForWeek(row.week), marathonGoalPace)}</td>
                       </tr>
                     );
                   })}
-                  {filteredPlan.length === 0 ? <tr><td colSpan="6" className="px-4 py-10 text-center text-sm text-slate-500">No weeks match the current search and phase filter.</td></tr> : null}
+                  {filteredPlan.length === 0 ? <tr><td colSpan="7" className="px-4 py-10 text-center text-sm text-slate-500">No weeks match the current search and phase filter.</td></tr> : null}
                 </tbody>
               </table>
             </div>
@@ -1081,7 +1308,7 @@ export default function App() {
 
           <footer className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 text-xs leading-6 text-slate-500">
             <div className="font-semibold text-slate-300">Coaching and safety notes</div>
-            This is a planning and logging tool, not a medical device or a substitute for an individualized assessment. Coaching notes and pace/recovery guardrails are deterministic planning rules, not AI-generated advice, clinically validated injury predictions, or universal physiological zones. The 157-week mileage progression is a fixed template, not a validated prescription for every runner, and does not adapt to missed sessions or changes in fitness. Do not progress through pain, persistent fatigue, altered gait, or illness. Reassess the pace range using observed effort and qualified coaching input. Seek prompt medical care for severe pain, inability to bear weight, significant swelling, or other concerning symptoms. Records remain in this browser unless you explicitly connect Strava to import activities; browser site-data controls can clear them.
+            This is a planning and logging tool, not a medical device or a substitute for an individualized assessment. Coaching notes and pace/recovery guardrails are deterministic planning rules, not AI-generated advice, clinically validated injury predictions, or universal physiological zones. The 157-week mileage progression and optional four-week quality-pace suggestions are planning aids, not validated prescriptions; the 7:30/km default marathon goal is aspirational and is not guaranteed to be appropriate or achievable. Easy running remains separate from race-pace work. Do not progress through pain, persistent fatigue, altered gait, or illness; any non-AMAN hip check-in or recovery lock takes priority over pace goals. Reassess the pace range using observed effort and qualified coaching input. Seek prompt medical care for severe pain, inability to bear weight, significant swelling, or other concerning symptoms. Records remain in this browser unless you explicitly connect Strava to import activities; browser site-data controls can clear them.
           </footer>
         </main>
       </div>
