@@ -8,10 +8,8 @@ import React, { useEffect, useMemo, useState } from "react";
  * - No charting, icon, router, or UI libraries are required.
  * - Training logs, check-ins, OAuth demo state, and settings are stored in LocalStorage.
  *
- * Strava note:
- * This file intentionally implements an OAuth URL preview and a simulated callback.
- * A production Strava connection requires a secure backend to exchange the returned
- * authorization code for an access token. Never put a Strava client secret in a browser app.
+ * Strava OAuth and token handling run in the Vercel API routes; only activity summaries
+ * and connection metadata are exposed to this browser app.
  */
 
 const PLAN_START = new Date(2026, 10, 2); // Monday, 02 November 2026 (local time)
@@ -329,6 +327,19 @@ const inputClass = "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 
 const buttonClass = "inline-flex items-center justify-center rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:cursor-not-allowed disabled:opacity-50";
 const secondaryButtonClass = "inline-flex items-center justify-center rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:border-slate-600 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-500 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:cursor-not-allowed disabled:opacity-50";
 
+async function readApiResponse(response) {
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error("The Strava server returned an invalid response.");
+  }
+  if (!response.ok) {
+    throw new Error(typeof payload.error === "string" ? payload.error : "The Strava request failed.");
+  }
+  return payload;
+}
+
 export default function App() {
   const today = useMemo(() => new Date(), []);
   const tomorrow = useMemo(() => addDays(today, 1), [today]);
@@ -341,23 +352,18 @@ export default function App() {
   const [checkIns, setCheckIns] = useLocalStorageState("ai-running-coach:hip-checkins", {});
   const [recoveryDates, setRecoveryDates] = useLocalStorageState("ai-running-coach:recovery-dates", []);
   const [guardrailEvents, setGuardrailEvents] = useLocalStorageState("ai-running-coach:guardrail-events", []);
-  const [clientId, setClientId] = useLocalStorageState("ai-running-coach:strava-client-id", "");
-  const [redirectUri, setRedirectUri] = useLocalStorageState(
-    "ai-running-coach:strava-redirect-uri",
-    typeof window !== "undefined" ? `${window.location.origin}${window.location.pathname}` : "http://localhost:5173/",
-  );
-  const [stravaConnection, setStravaConnection] = useLocalStorageState("ai-running-coach:strava-demo-connection", {
-    connected: false,
-    mode: "simulation",
-    connectedAt: null,
-  });
-
   const [activityForm, setActivityForm] = useState({ distance: "", duration: "", heartRate: "" });
   const [logFeedback, setLogFeedback] = useState(null);
   const [hipForm, setHipForm] = useState({ clicking: "No", painScore: 0, symptoms: "" });
   const [hipFeedback, setHipFeedback] = useState("");
-  const [authUrl, setAuthUrl] = useState("");
-  const [oauthMessage, setOauthMessage] = useState("");
+  const [stravaStatus, setStravaStatus] = useState({
+    loading: true,
+    configured: false,
+    connected: false,
+    athlete: null,
+  });
+  const [stravaBusy, setStravaBusy] = useState(false);
+  const [stravaMessage, setStravaMessage] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [phaseFilter, setPhaseFilter] = useState("all");
 
@@ -377,6 +383,45 @@ export default function App() {
   const tomorrowDurationRange = tomorrowWorkout.distance > 0
     ? `${formatDuration(tomorrowWorkout.distance * EASY_PACE_MIN)} – ${formatDuration(tomorrowWorkout.distance * EASY_PACE_MAX)}`
     : "No running duration prescribed";
+
+  useEffect(() => {
+    let active = true;
+    const callbackResult = new URLSearchParams(window.location.search).get("strava");
+    if (callbackResult) {
+      const callbackMessages = {
+        connected: "Strava connected securely. You can now import your recent runs.",
+        denied: "Strava authorization was cancelled.",
+        failed: "Strava could not complete authorization. Check the server setup and try again.",
+      };
+      setStravaMessage(callbackMessages[callbackResult] || "Strava authorization was not completed.");
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+
+    fetch("/api/strava/status")
+      .then(readApiResponse)
+      .then((status) => {
+        if (!active) return;
+        setStravaStatus({
+          loading: false,
+          configured: Boolean(status.configured),
+          connected: Boolean(status.connected),
+          athlete: status.athlete || null,
+        });
+        if (status.error) setStravaMessage(status.error);
+        else if (!status.configured) {
+          setStravaMessage("Live Strava connection requires the Vercel deployment and its server environment variables.");
+        }
+      })
+      .catch(() => {
+        if (!active) return;
+        setStravaStatus({ loading: false, configured: false, connected: false, athlete: null });
+        setStravaMessage("The Strava API is unavailable here. Deploy this app to Vercel and configure its server environment variables.");
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (activeCheckIn) {
@@ -437,6 +482,7 @@ export default function App() {
       : `activity-${Date.now()}`;
     const activity = {
       id: activityId,
+      source: "manual",
       date: toLocalISODate(today),
       week: activeWeek,
       distance: round1(distance),
@@ -498,39 +544,99 @@ export default function App() {
     }
   }
 
-  function handleGenerateAuthUrl() {
-    if (!clientId.trim()) {
-      setOauthMessage("Enter your Strava Client ID before generating the authorization URL.");
-      return;
+  async function connectStrava() {
+    setStravaBusy(true);
+    setStravaMessage("");
+    try {
+      const response = await fetch("/api/strava/connect", { method: "POST" });
+      const payload = await readApiResponse(response);
+      window.location.assign(payload.authorizationUrl);
+    } catch (error) {
+      setStravaMessage(error.message);
+      setStravaBusy(false);
     }
-    if (!redirectUri.trim()) {
-      setOauthMessage("Enter an authorization redirect URI before generating the URL.");
-      return;
-    }
-    const parameters = new URLSearchParams({
-      client_id: clientId.trim(),
-      response_type: "code",
-      redirect_uri: redirectUri.trim(),
-      approval_prompt: "auto",
-      scope: "read,activity:read_all",
-      state: "ai-running-coach-demo",
-    });
-    setAuthUrl(`https://www.strava.com/oauth/authorize?${parameters.toString()}`);
-    setOauthMessage("Authorization URL generated. This demo has not contacted Strava and has not received an access token.");
   }
 
-  function handleSimulatedCallback() {
-    if (!authUrl) {
-      setOauthMessage("Generate the authorization URL first. The callback simulation requires a Client ID and redirect URI.");
-      return;
+  async function importStravaActivities() {
+    setStravaBusy(true);
+    setStravaMessage("");
+    try {
+      const response = await fetch("/api/strava/activities");
+      const payload = await readApiResponse(response);
+      const imported = payload.activities.map((activity) => {
+        const distance = activity.distanceKm;
+        const duration = activity.durationMinutes;
+        const pace = duration / distance;
+        return {
+          id: `strava-${activity.id}`,
+          source: "Strava",
+          name: activity.name,
+          date: activity.date,
+          week: getPlanWeekForDate(new Date(`${activity.date}T12:00:00`)),
+          distance: round1(distance),
+          durationMinutes: round1(duration),
+          paceMinutes: pace,
+          pace: formatPace(pace),
+          heartRate: activity.heartRate,
+          loggedAt: new Date().toISOString(),
+        };
+      });
+      const existingIds = new Set(activities.map((activity) => activity.id));
+      const newActivities = imported.filter((activity) => !existingIds.has(activity.id));
+      setActivities((current) => {
+        const currentIds = new Set(current.map((activity) => activity.id));
+        return [
+          ...newActivities.filter((activity) => !currentIds.has(activity.id)),
+          ...current,
+        ].slice(0, 500);
+      });
+      const todayDate = toLocalISODate(today);
+      const overpacedToday = newActivities.filter(
+        (activity) => activity.date === todayDate && activity.paceMinutes < activeWeekRow.easyPaceMin,
+      );
+      if (overpacedToday.length) {
+        const recoveryDate = toLocalISODate(tomorrow);
+        setRecoveryDates((current) => Array.from(new Set([...current, recoveryDate])));
+        setGuardrailEvents((current) => {
+          const knownIds = new Set(current.map((event) => event.id));
+          const newEvents = overpacedToday
+            .filter((activity) => !knownIds.has(`strava-guardrail-${activity.id}`))
+            .map((activity) => ({
+              id: `strava-guardrail-${activity.id}`,
+              date: activity.date,
+              recoveryDate,
+              pace: activity.pace,
+              limit: formatPace(activeWeekRow.easyPaceMin),
+              distance: activity.distance,
+            }));
+          return [...newEvents, ...current].slice(0, 20);
+        });
+        setStravaMessage(`Imported ${newActivities.length} new ${newActivities.length === 1 ? "run" : "runs"}. Today's Strava run exceeded the easy-pace limit, so tomorrow is locked to recovery.`);
+      } else {
+        setStravaMessage(newActivities.length
+          ? `Imported ${newActivities.length} recent Strava ${newActivities.length === 1 ? "run" : "runs"}. Imported activities are saved in this browser.`
+          : "No new Strava runs to import. Recent run records are already saved in this browser.");
+      }
+    } catch (error) {
+      setStravaMessage(error.message);
+    } finally {
+      setStravaBusy(false);
     }
-    setStravaConnection({ connected: true, mode: "simulation", connectedAt: new Date().toISOString() });
-    setOauthMessage("Simulated callback received: code=SIMULATED_AUTH_CODE. The UI is marked connected for demonstration only; no Strava account data has been accessed.");
   }
 
-  function disconnectStravaDemo() {
-    setStravaConnection({ connected: false, mode: "simulation", connectedAt: null });
-    setOauthMessage("Demo connection cleared from this browser.");
+  async function disconnectStrava() {
+    setStravaBusy(true);
+    setStravaMessage("");
+    try {
+      const response = await fetch("/api/strava/disconnect", { method: "POST" });
+      await readApiResponse(response);
+      setStravaStatus((current) => ({ ...current, connected: false, athlete: null }));
+      setStravaMessage("Strava has been disconnected from this browser.");
+    } catch (error) {
+      setStravaMessage(error.message);
+    } finally {
+      setStravaBusy(false);
+    }
   }
 
   const filteredPlan = useMemo(() => {
@@ -694,28 +800,57 @@ export default function App() {
               {hipFeedback ? <p className="mt-3 rounded-xl border border-slate-800 bg-slate-950 p-3 text-sm leading-6 text-slate-300">{hipFeedback}</p> : null}
             </Panel>
 
-            <Panel title="Connect Strava Account" subtitle="Client ID and redirect URL preview only. This front-end demo does not exchange tokens or import activity automatically." action={stravaConnection.connected ? <Badge tone="emerald">SIMULATED CONNECTED</Badge> : <Badge>NOT CONNECTED</Badge>}>
+            <Panel
+              title="Connect Strava Account"
+              subtitle="Authorize the server to read your activity, then import your 30 most recent runs. OAuth tokens remain server-side."
+              action={stravaStatus.loading
+                ? <Badge>CHECKING</Badge>
+                : stravaStatus.connected
+                  ? <Badge tone="emerald">CONNECTED</Badge>
+                  : stravaStatus.configured
+                    ? <Badge>NOT CONNECTED</Badge>
+                    : <Badge tone="amber">SETUP REQUIRED</Badge>}
+            >
               <div className="space-y-4">
-                <Field label="Strava Client ID" hint="Use the numeric Client ID from your Strava API application. A client secret is never requested or stored here.">
-                  <input className={inputClass} type="text" inputMode="numeric" value={clientId} onChange={(event) => setClientId(event.target.value)} />
-                </Field>
-                <Field label="Authorization redirect URI" hint="Must match the redirect domain/path configured in your Strava API application when using real OAuth.">
-                  <input className={inputClass} type="url" value={redirectUri} onChange={(event) => setRedirectUri(event.target.value)} />
-                </Field>
-                <div className="flex flex-wrap gap-2">
-                  <button type="button" className={buttonClass} onClick={handleGenerateAuthUrl}>Generate authorization URL</button>
-                  <button type="button" className={secondaryButtonClass} onClick={handleSimulatedCallback} disabled={!authUrl}>Simulate OAuth callback</button>
-                  {stravaConnection.connected ? <button type="button" className={secondaryButtonClass} onClick={disconnectStravaDemo}>Disconnect demo</button> : null}
-                </div>
-                {authUrl ? (
-                  <div className="rounded-xl border border-slate-800 bg-slate-950 p-3">
-                    <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Generated authorization URL</div>
-                    <code className="block break-all text-xs leading-5 text-sky-300">{authUrl}</code>
-                  </div>
+                {stravaStatus.athlete ? (
+                  <p className="text-sm text-slate-300">
+                    Connected as {[stravaStatus.athlete.firstName, stravaStatus.athlete.lastName].filter(Boolean).join(" ") || "Strava athlete"}.
+                  </p>
                 ) : null}
-                {oauthMessage ? <p className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-sm leading-6 text-slate-300">{oauthMessage}</p> : null}
+                <div className="flex flex-wrap gap-2">
+                  {!stravaStatus.connected ? (
+                    <button
+                      type="button"
+                      className={buttonClass}
+                      onClick={connectStrava}
+                      disabled={stravaBusy || stravaStatus.loading || !stravaStatus.configured}
+                    >
+                      {stravaBusy ? "Connecting..." : "Connect with Strava"}
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className={buttonClass}
+                        onClick={importStravaActivities}
+                        disabled={stravaBusy}
+                      >
+                        {stravaBusy ? "Working..." : "Import recent runs"}
+                      </button>
+                      <button
+                        type="button"
+                        className={secondaryButtonClass}
+                        onClick={disconnectStrava}
+                        disabled={stravaBusy}
+                      >
+                        Disconnect Strava
+                      </button>
+                    </>
+                  )}
+                </div>
+                {stravaMessage ? <p className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-sm leading-6 text-slate-300">{stravaMessage}</p> : null}
                 <div className="rounded-xl border border-amber-900/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-200/90">
-                  Production requirement: complete the OAuth code exchange on a trusted server, validate the state parameter, store tokens securely, and call Strava APIs from that server. Do not expose a client secret in this SPA.
+                  The server stores Strava tokens in an encrypted, HttpOnly cookie. Imported run summaries are saved in this browser; disconnecting revokes the Strava grant and clears the session.
                 </div>
               </div>
             </Panel>
@@ -750,7 +885,7 @@ export default function App() {
               ) : null}
             </Panel>
 
-            <Panel title="Recent training activity" subtitle={`${activities.length} locally stored ${activities.length === 1 ? "activity" : "activities"}. Records remain in this browser's LocalStorage.`}>
+            <Panel title="Recent training activity" subtitle={`${activities.length} locally stored ${activities.length === 1 ? "activity" : "activities"}. Manual entries and imported Strava runs are kept in this browser's LocalStorage.`}>
               {recentActivities.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/60 p-6 text-center">
                   <p className="text-sm font-medium text-slate-300">No activities logged yet</p>
@@ -763,11 +898,14 @@ export default function App() {
                     <tbody className="divide-y divide-slate-800">
                       {recentActivities.map((activity) => (
                         <tr key={activity.id}>
-                          <td className="py-3 pr-3 text-slate-400">{activity.date}</td>
+                          <td className="py-3 pr-3 text-slate-400">
+                            <div>{activity.date}</div>
+                            <div className="text-xs text-slate-500">{activity.source === "Strava" ? activity.name : "Manual"}</div>
+                          </td>
                           <td className="py-3 pr-3 font-medium text-slate-200">{activity.distance.toFixed(1)} km</td>
                           <td className="py-3 pr-3 text-slate-300">{formatDuration(activity.durationMinutes)}</td>
                           <td className="py-3 pr-3"><span className={activity.paceMinutes < EASY_PACE_MIN ? "font-semibold text-amber-300" : "text-emerald-300"}>{activity.pace}</span></td>
-                          <td className="py-3 text-slate-300">{activity.heartRate} bpm</td>
+                          <td className="py-3 text-slate-300">{activity.heartRate == null ? "—" : `${activity.heartRate} bpm`}</td>
                         </tr>
                       ))}
                     </tbody>
