@@ -1,0 +1,857 @@
+import React, { useEffect, useMemo, useState } from "react";
+
+/*
+ * AI Running Coach — single-file React SPA
+ *
+ * Requirements:
+ * - React 18+ and Tailwind CSS configured in the host project.
+ * - No charting, icon, router, or UI libraries are required.
+ * - Training logs, check-ins, OAuth demo state, and settings are stored in LocalStorage.
+ *
+ * Strava note:
+ * This file intentionally implements an OAuth URL preview and a simulated callback.
+ * A production Strava connection requires a secure backend to exchange the returned
+ * authorization code for an access token. Never put a Strava client secret in a browser app.
+ */
+
+const PLAN_START = new Date(2026, 10, 2); // Monday, 02 November 2026 (local time)
+const TOTAL_WEEKS = 157;
+const EASY_PACE_MIN = 10 + 15 / 60; // faster-than-this is considered overpacing
+const EASY_PACE_MAX = 11;
+const PROFILE = { age: 26, heightCm: 170, weightKg: 65 };
+const PROFILE_BMI = PROFILE.weightKg / Math.pow(PROFILE.heightCm / 100, 2);
+
+const PHASES = [
+  { id: 1, start: 1, end: 26, name: "Foundation & Run-Walk", focus: "Build a consistent, injury-aware running habit." },
+  { id: 2, start: 27, end: 52, name: "Aerobic Base", focus: "Build comfortable aerobic time and repeatable weekly rhythm." },
+  { id: 3, start: 53, end: 78, name: "Endurance & 10K", focus: "Develop endurance while keeping most running conversational." },
+  { id: 4, start: 79, end: 104, name: "Half-Marathon Development", focus: "Extend long-run durability and introduce controlled steady work." },
+  { id: 5, start: 105, end: 130, name: "Marathon Base", focus: "Build sustainable volume, fueling habits, and strength durability." },
+  { id: 6, start: 131, end: 149, name: "Marathon-Specific Build", focus: "Practice marathon-specific endurance and race-day routines." },
+  { id: 7, start: 150, end: 154, name: "Peak & Taper", focus: "Reduce fatigue while maintaining relaxed movement and routine." },
+  { id: 8, start: 155, end: 155, name: "Goal Marathon Week", focus: "Execute the goal event conservatively and prioritize recovery." },
+  { id: 9, start: 156, end: 157, name: "Post-Marathon Recovery", focus: "Recover; no pressure to resume structured training." },
+];
+
+function round1(value) {
+  return Math.round(value * 10) / 10;
+}
+
+function interpolate(start, end, position) {
+  return start + (end - start) * Math.max(0, Math.min(1, position));
+}
+
+function phaseForWeek(week) {
+  return PHASES.find((phase) => week >= phase.start && week <= phase.end) || PHASES[0];
+}
+
+function trendVolumeForWeek(week) {
+  if (week <= 26) return interpolate(6, 18, (week - 1) / 25);
+  if (week <= 52) return interpolate(18, 26, (week - 27) / 25);
+  if (week <= 78) return interpolate(24, 32, (week - 53) / 25);
+  if (week <= 104) return interpolate(28, 38, (week - 79) / 25);
+  if (week <= 130) return interpolate(34, 44, (week - 105) / 25);
+  if (week <= 149) return interpolate(38, 50, (week - 131) / 18);
+  const taperVolumes = { 150: 44, 151: 35, 152: 28, 153: 20, 154: 14 };
+  if (week <= 154) return taperVolumes[week];
+  if (week === 155) return 45; // Includes the 42.2 km goal event and warm-up/cool-down.
+  if (week >= 156) return 0;
+  return 0;
+}
+
+function qualityNoteForWeek(week, phase) {
+  if (week === 155) return "Goal marathon week: follow the rehearsed pacing and fueling plan; walk aid stations as needed.";
+  if (week >= 156) return "Recovery only: walking and gentle mobility as comfortable; no workout or mileage target is required.";
+  if (week >= 150) {
+    const taperNotes = {
+      150: "Final substantial week: one controlled aerobic session; no new workouts or equipment.",
+      151: "Taper: reduce volume; retain only short, relaxed strides if fully symptom-free.",
+      152: "Taper: short easy sessions, familiar fueling, and extra sleep; avoid hard efforts.",
+      153: "Taper: prioritize freshness; a few relaxed minutes of running are enough.",
+      154: "Race-preparation week: brief shakeout only; rest, logistics, and familiar meals take priority.",
+    };
+    return taperNotes[week];
+  }
+  if (week % 4 === 0) return "Cutback week: reduce accumulated load; keep every session easy and finish feeling fresh.";
+
+  const notesByPhase = {
+    1: [
+      "Three easy run-walk sessions; use short jog intervals and full-sentence conversation as the effort test.",
+      "Repeat the run-walk pattern; stop while form still feels relaxed.",
+      "Add time only if the previous week was symptom-free; no speed work.",
+    ],
+    2: [
+      "Easy aerobic running; optional 4 × 15-second relaxed strides only after a pain-free warm-up.",
+      "Keep the long outing conversational; use walk breaks before fatigue changes your form.",
+      "Practice steady breathing and consistent cadence; no all-out intervals.",
+    ],
+    3: [
+      "Gentle aerobic session; optional 6 × 1-minute steady running with full easy recovery.",
+      "Easy hills may be introduced as controlled effort, not sprinting; walk down if needed.",
+      "Long-run durability is the priority; keep the next day free of hard training.",
+    ],
+    4: [
+      "Controlled steady blocks, such as 3 × 5 minutes, with easy recovery; never run all-out.",
+      "Practice even effort on the long outing; finish with reserve rather than chasing pace.",
+      "A short tempo segment is optional only when pain-free and well recovered.",
+    ],
+    5: [
+      "Marathon-base session: controlled steady running and familiar post-run fueling.",
+      "Practice taking fluids and carbohydrates during longer outings; use products already tolerated.",
+      "Keep easy days genuinely easy; strength work should not impair the next run.",
+    ],
+    6: [
+      "Marathon-specific long-run structure with a controlled segment; rehearse race-day fueling.",
+      "Use a steady aerobic session, not a time trial; maintain relaxed form under fatigue.",
+      "Practice the planned kit and hydration routine; cut back promptly if symptoms appear.",
+    ],
+  };
+  const choices = notesByPhase[phase.id] || ["Easy aerobic running; keep effort controlled and recovery complete."];
+  return choices[(week - phase.start) % choices.length];
+}
+
+function createTrainingPlan() {
+  const weeks = [];
+  let previousVolume = 6;
+  for (let week = 1; week <= TOTAL_WEEKS; week += 1) {
+    let targetVolume = trendVolumeForWeek(week);
+    if (week <= 149 && week > 1) {
+      // A cutback every fourth week, with increases capped at 10% between other weeks.
+      targetVolume = week % 4 === 0
+        ? Math.min(targetVolume, previousVolume * 0.82)
+        : Math.min(targetVolume, previousVolume * 1.1);
+    }
+    targetVolume = round1(targetVolume);
+    if (week >= 150) targetVolume = round1(trendVolumeForWeek(week));
+
+    const weekStart = new Date(PLAN_START);
+    weekStart.setDate(weekStart.getDate() + (week - 1) * 7);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 6);
+    const phase = phaseForWeek(week);
+
+    weeks.push({
+      week,
+      start: weekStart,
+      end: weekEnd,
+      phase: phase.name,
+      phaseId: phase.id,
+      targetVolume,
+      easyPaceMin: EASY_PACE_MIN,
+      easyPaceMax: EASY_PACE_MAX,
+      qualityNote: qualityNoteForWeek(week, phase),
+    });
+    previousVolume = targetVolume;
+  }
+  return weeks;
+}
+
+const TRAINING_PLAN = createTrainingPlan();
+
+function toLocalISODate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function addDays(date, amount) {
+  const copy = new Date(date);
+  copy.setDate(copy.getDate() + amount);
+  return copy;
+}
+
+function getPlanWeekForDate(date) {
+  const utcDate = Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
+  const utcStart = Date.UTC(PLAN_START.getFullYear(), PLAN_START.getMonth(), PLAN_START.getDate());
+  const elapsedDays = Math.floor((utcDate - utcStart) / 86400000);
+  const calculatedWeek = Math.floor(elapsedDays / 7) + 1;
+  return Math.max(1, Math.min(TOTAL_WEEKS, calculatedWeek));
+}
+
+function formatDate(date, options = { day: "2-digit", month: "short", year: "numeric" }) {
+  return new Intl.DateTimeFormat("en-GB", options).format(date);
+}
+
+function formatDateRange(start, end) {
+  const sameYear = start.getFullYear() === end.getFullYear();
+  if (sameYear) {
+    const startLabel = new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short" }).format(start);
+    const endLabel = new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short", year: "numeric" }).format(end);
+    return `${startLabel} – ${endLabel}`;
+  }
+  return `${formatDate(start)} – ${formatDate(end)}`;
+}
+
+function formatPace(decimalMinutes) {
+  if (!Number.isFinite(decimalMinutes) || decimalMinutes <= 0) return "—";
+  const wholeMinutes = Math.floor(decimalMinutes);
+  const seconds = Math.round((decimalMinutes - wholeMinutes) * 60);
+  const normalizedMinutes = seconds === 60 ? wholeMinutes + 1 : wholeMinutes;
+  const normalizedSeconds = seconds === 60 ? 0 : seconds;
+  return `${String(normalizedMinutes).padStart(2, "0")}:${String(normalizedSeconds).padStart(2, "0")}`;
+}
+
+function formatDuration(totalMinutes) {
+  if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return "—";
+  const rounded = Math.round(totalMinutes);
+  const hours = Math.floor(rounded / 60);
+  const minutes = rounded % 60;
+  return hours > 0 ? `${hours}h ${String(minutes).padStart(2, "0")}m` : `${minutes} min`;
+}
+
+function getRunDistanceForDate(date, weekRow) {
+  const day = date.getDay();
+  const foundation = weekRow.week <= 26;
+  const shares = foundation
+    ? { 2: 0.33, 4: 0.33, 0: 0.34 }
+    : { 2: 0.25, 4: 0.25, 6: 0.2, 0: 0.3 };
+  const share = shares[day] || 0;
+  return round1(weekRow.targetVolume * share);
+}
+
+function getWorkoutForDate(date, weekRow, lockReason = "") {
+  if (lockReason) {
+    return {
+      title: "Rest / Recovery — locked",
+      type: "Recovery",
+      distance: 0,
+      note: lockReason,
+      locked: true,
+    };
+  }
+
+  const day = date.getDay();
+  if (weekRow.week === 155) {
+    if (day === 0) return { title: "Goal marathon — 42.2 km", type: "Race", distance: 42.2, note: "Run the event using the conservative pacing and fueling strategy rehearsed in training. Use aid stations, walk breaks, and medical support as needed.", locked: false };
+    if (day === 2) return { title: "Short race-week shakeout", type: "Shakeout", distance: 1.5, note: "Very easy shakeout only; stop while feeling fresh. No strides are required.", locked: false };
+    if (day === 4) return { title: "Short race-week shakeout", type: "Shakeout", distance: 1.3, note: "Very easy shakeout only; prepare race kit and avoid adding extra distance.", locked: false };
+    return { title: day === 1 ? "Rest + left-hip check-in" : "Rest before / after race", type: "Rest", distance: 0, note: "Rest, familiar meals, hydration, and race logistics take priority. No make-up training.", locked: false };
+  }
+  if (weekRow.week >= 156) {
+    return { title: "Post-marathon recovery", type: "Recovery", distance: 0, note: "No running is prescribed. Gentle walking and pain-free mobility are optional; resume running only when daily movement feels normal and recovery is progressing.", locked: false };
+  }
+
+  const foundation = weekRow.week <= 26;
+  const distance = getRunDistanceForDate(date, weekRow);
+  if (day === 1) return { title: "Rest + left-hip check-in", type: "Rest", distance: 0, note: "No running. Complete the Monday symptom check and use gentle mobility only if comfortable.", locked: false };
+  if (day === 3) return { title: "Strength and mobility", type: "Strength", distance: 0, note: "Optional light strength: calf raises, split squats, glute bridges, and trunk stability; stop if pain changes your movement.", locked: false };
+  if (day === 5) return { title: "Rest day", type: "Rest", distance: 0, note: "Prioritize sleep, hydration, and normal daily movement. No make-up mileage.", locked: false };
+  if (day === 6 && foundation) return { title: "Strength / easy walk", type: "Cross-training", distance: 0, note: "Optional low-impact walk and brief strength routine; keep the legs fresh for the long outing.", locked: false };
+  if (day === 2) return { title: foundation ? "Easy run-walk" : "Easy aerobic run", type: "Easy", distance, note: "Stay inside the locked easy-pace range and use the talk test. Walk breaks are planned, not a failure.", locked: false };
+  if (day === 4) return { title: foundation ? "Easy run-walk" : "Easy + controlled quality", type: foundation ? "Easy" : "Quality", distance, note: foundation ? "Comfortable run-walk only; no intervals or pace targets." : weekRow.qualityNote, locked: false };
+  if (day === 6) return { title: "Easy aerobic run", type: "Easy", distance, note: "Relaxed effort. Keep this shorter than the long outing and avoid adding distance to compensate for missed sessions.", locked: false };
+  return { title: "Long easy outing", type: "Long easy", distance, note: foundation ? "Run-walk at conversational effort. Finish with energy in reserve." : "Easy endurance outing; practice familiar fluids and fueling as duration increases.", locked: false };
+}
+
+function assessHipStatus({ clicking, painScore, symptoms }) {
+  const symptomText = String(symptoms || "").toLowerCase();
+  const redFlagTerms = [
+    "limp",
+    "cannot bear weight",
+    "can't bear weight",
+    "unable to bear weight",
+    "swelling",
+    "hot joint",
+    "night pain",
+    "pain at rest",
+    "rest pain",
+    "sharp pain",
+    "numbness",
+  ];
+  const hasRedFlag = redFlagTerms.some((term) => symptomText.includes(term));
+  if (Number(painScore) >= 5 || hasRedFlag) return "PERIKSA";
+  if (clicking === "Yes" || Number(painScore) > 0 || String(symptoms || "").trim()) return "WASPADA";
+  return "AMAN";
+}
+
+function useLocalStorageState(key, initialValue) {
+  const [value, setValue] = useState(() => {
+    if (typeof window === "undefined") return initialValue;
+    try {
+      const stored = window.localStorage.getItem(key);
+      return stored === null ? initialValue : JSON.parse(stored);
+    } catch (error) {
+      console.warn(`Unable to read LocalStorage key "${key}".`, error);
+      return initialValue;
+    }
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+    } catch (error) {
+      console.warn(`Unable to save LocalStorage key "${key}".`, error);
+    }
+  }, [key, value]);
+
+  return [value, setValue];
+}
+
+function Badge({ children, tone = "slate" }) {
+  const tones = {
+    slate: "border-slate-600 bg-slate-800 text-slate-200",
+    emerald: "border-emerald-700/70 bg-emerald-950/70 text-emerald-300",
+    amber: "border-amber-700/70 bg-amber-950/70 text-amber-300",
+    red: "border-red-700/70 bg-red-950/70 text-red-300",
+    blue: "border-sky-700/70 bg-sky-950/70 text-sky-300",
+  };
+  return <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold tracking-wide ${tones[tone] || tones.slate}`}>{children}</span>;
+}
+
+function Panel({ title, subtitle, action, children, className = "" }) {
+  return (
+    <section className={`rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-black/10 ${className}`}>
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-base font-semibold text-slate-100">{title}</h2>
+          {subtitle ? <p className="mt-1 text-sm leading-6 text-slate-400">{subtitle}</p> : null}
+        </div>
+        {action || null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function Field({ label, hint, children }) {
+  return (
+    <label className="block space-y-1.5">
+      <span className="text-sm font-medium text-slate-300">{label}</span>
+      {children}
+      {hint ? <span className="block text-xs leading-5 text-slate-500">{hint}</span> : null}
+    </label>
+  );
+}
+
+const inputClass = "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20";
+const buttonClass = "inline-flex items-center justify-center rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:cursor-not-allowed disabled:opacity-50";
+const secondaryButtonClass = "inline-flex items-center justify-center rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:border-slate-600 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-500 focus:ring-offset-2 focus:ring-offset-slate-900 disabled:cursor-not-allowed disabled:opacity-50";
+
+export default function App() {
+  const today = useMemo(() => new Date(), []);
+  const tomorrow = useMemo(() => addDays(today, 1), [today]);
+  const activeWeek = getPlanWeekForDate(today);
+  const activeWeekRow = TRAINING_PLAN[activeWeek - 1];
+  const tomorrowWeek = getPlanWeekForDate(tomorrow);
+  const tomorrowWeekRow = TRAINING_PLAN[tomorrowWeek - 1];
+
+  const [activities, setActivities] = useLocalStorageState("ai-running-coach:activities", []);
+  const [checkIns, setCheckIns] = useLocalStorageState("ai-running-coach:hip-checkins", {});
+  const [recoveryDates, setRecoveryDates] = useLocalStorageState("ai-running-coach:recovery-dates", []);
+  const [guardrailEvents, setGuardrailEvents] = useLocalStorageState("ai-running-coach:guardrail-events", []);
+  const [clientId, setClientId] = useLocalStorageState("ai-running-coach:strava-client-id", "");
+  const [redirectUri, setRedirectUri] = useLocalStorageState(
+    "ai-running-coach:strava-redirect-uri",
+    typeof window !== "undefined" ? `${window.location.origin}${window.location.pathname}` : "http://localhost:5173/",
+  );
+  const [stravaConnection, setStravaConnection] = useLocalStorageState("ai-running-coach:strava-demo-connection", {
+    connected: false,
+    mode: "simulation",
+    connectedAt: null,
+  });
+
+  const [activityForm, setActivityForm] = useState({ distance: "", duration: "", heartRate: "" });
+  const [logFeedback, setLogFeedback] = useState(null);
+  const [hipForm, setHipForm] = useState({ clicking: "No", painScore: 0, symptoms: "" });
+  const [hipFeedback, setHipFeedback] = useState("");
+  const [authUrl, setAuthUrl] = useState("");
+  const [oauthMessage, setOauthMessage] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [phaseFilter, setPhaseFilter] = useState("all");
+
+  const activeCheckIn = checkIns[String(activeWeek)] || null;
+  const tomorrowCheckIn = checkIns[String(tomorrowWeek)] || null;
+  const activeHipLock = Boolean(activeCheckIn && activeCheckIn.status !== "AMAN");
+  const tomorrowHipLock = Boolean(tomorrowCheckIn && tomorrowCheckIn.status !== "AMAN");
+  const tomorrowPaceLock = recoveryDates.includes(toLocalISODate(tomorrow));
+  const tomorrowLockReason = tomorrowHipLock
+    ? `Hip check-in is ${tomorrowCheckIn.status}: use Rest / Recovery for the full week and cap planned volume at 75%.`
+    : tomorrowPaceLock
+      ? "A recent activity was faster than the easy-pace guardrail. Tomorrow is reserved for recovery; do not replace it with another workout."
+      : "";
+  const tomorrowWorkout = getWorkoutForDate(tomorrow, tomorrowWeekRow, tomorrowLockReason);
+  const activeVolume = round1(activeWeekRow.targetVolume * (activeHipLock ? 0.75 : 1));
+  const tomorrowVolume = round1(tomorrowWeekRow.targetVolume * (tomorrowHipLock ? 0.75 : 1));
+  const tomorrowDurationRange = tomorrowWorkout.distance > 0
+    ? `${formatDuration(tomorrowWorkout.distance * EASY_PACE_MIN)} – ${formatDuration(tomorrowWorkout.distance * EASY_PACE_MAX)}`
+    : "No running duration prescribed";
+
+  useEffect(() => {
+    if (activeCheckIn) {
+      setHipForm({
+        clicking: activeCheckIn.clicking,
+        painScore: activeCheckIn.painScore,
+        symptoms: activeCheckIn.symptoms,
+      });
+      setHipFeedback("");
+    } else {
+      setHipForm({ clicking: "No", painScore: 0, symptoms: "" });
+      setHipFeedback("");
+    }
+  }, [activeWeek, activeCheckIn]);
+
+  const liveHipStatus = assessHipStatus(hipForm);
+  const calculatedPace = useMemo(() => {
+    const distance = Number(activityForm.distance);
+    const duration = Number(activityForm.duration);
+    if (distance > 0 && duration > 0) return duration / distance;
+    return null;
+  }, [activityForm.distance, activityForm.duration]);
+
+  const coachAdvice = useMemo(() => {
+    if (tomorrowWorkout.locked && tomorrowHipLock) {
+      return "Your hip check-in takes priority over the schedule. Do not test the hip with a run. Use pain-free daily movement only; persistent, worsening, or function-limiting symptoms warrant assessment by a qualified clinician.";
+    }
+    if (tomorrowWorkout.locked && tomorrowPaceLock) {
+      return "The pace guardrail has deliberately removed tomorrow's run. Recovery is part of the plan: sleep, eat normally, hydrate, and resume only when you feel recovered.";
+    }
+    if (tomorrowWorkout.type === "Quality") {
+      return "Keep the easy portions genuinely easy. The controlled segment is optional and should feel comfortably controlled, never like a race. Stop if pain changes your stride.";
+    }
+    return `At age ${PROFILE.age}, ${PROFILE.heightCm} cm, and ${PROFILE.weightKg} kg (BMI ${PROFILE_BMI.toFixed(1)}), the priority is repeatable training rather than pace-chasing. Use the talk test, especially in warm or humid conditions; maintain two light strength sessions when recovered, and protect sleep and fueling. BMI is context only, not a performance target.`;
+  }, [tomorrowWorkout, tomorrowHipLock, tomorrowPaceLock]);
+
+  function handleActivitySubmit(event) {
+    event.preventDefault();
+    const distance = Number(activityForm.distance);
+    const duration = Number(activityForm.duration);
+    const heartRate = Number(activityForm.heartRate);
+    if (!Number.isFinite(distance) || distance <= 0 || distance > 100) {
+      setLogFeedback({ tone: "red", text: "Enter a distance greater than 0 and no more than 100 km." });
+      return;
+    }
+    if (!Number.isFinite(duration) || duration <= 0 || duration > 1440) {
+      setLogFeedback({ tone: "red", text: "Enter a duration greater than 0 and no more than 1,440 minutes." });
+      return;
+    }
+    if (!Number.isFinite(heartRate) || heartRate < 30 || heartRate > 230) {
+      setLogFeedback({ tone: "red", text: "Enter a heart rate between 30 and 230 bpm." });
+      return;
+    }
+
+    const pace = duration / distance;
+    const activityId = typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `activity-${Date.now()}`;
+    const activity = {
+      id: activityId,
+      date: toLocalISODate(today),
+      week: activeWeek,
+      distance: round1(distance),
+      durationMinutes: round1(duration),
+      paceMinutes: pace,
+      pace: formatPace(pace),
+      heartRate: Math.round(heartRate),
+      loggedAt: new Date().toISOString(),
+    };
+    setActivities((current) => [activity, ...current].slice(0, 500));
+
+    if (pace < activeWeekRow.easyPaceMin) {
+      const recoveryDate = toLocalISODate(tomorrow);
+      setRecoveryDates((current) => Array.from(new Set([...current, recoveryDate])));
+      const eventRecord = {
+        id: `guardrail-${Date.now()}`,
+        date: toLocalISODate(today),
+        recoveryDate,
+        pace: formatPace(pace),
+        limit: formatPace(activeWeekRow.easyPaceMin),
+        distance: round1(distance),
+      };
+      setGuardrailEvents((current) => [eventRecord, ...current].slice(0, 20));
+      setLogFeedback({
+        tone: "amber",
+        text: `Overpacing detected: ${formatPace(pace)} min/km is faster than this week's ${formatPace(activeWeekRow.easyPaceMin)} min/km easy-pace limit. Tomorrow (${formatDate(tomorrow)}) is now locked to Rest / Recovery.`,
+      });
+    } else if (pace > activeWeekRow.easyPaceMax) {
+      setLogFeedback({
+        tone: "emerald",
+        text: `Activity saved at ${formatPace(pace)} min/km. This is slower than the prescribed pace band; that is not an overpacing alert. Keep effort conversational and account for heat, hills, and fatigue.`,
+      });
+    } else {
+      setLogFeedback({
+        tone: "emerald",
+        text: `Activity saved at ${formatPace(pace)} min/km, inside the ${formatPace(activeWeekRow.easyPaceMin)}–${formatPace(activeWeekRow.easyPaceMax)} min/km easy-pace band.`,
+      });
+    }
+    setActivityForm({ distance: "", duration: "", heartRate: "" });
+  }
+
+  function handleHipSubmit(event) {
+    event.preventDefault();
+    const status = assessHipStatus(hipForm);
+    const record = {
+      ...hipForm,
+      painScore: Number(hipForm.painScore),
+      status,
+      week: activeWeek,
+      savedAt: new Date().toISOString(),
+    };
+    setCheckIns((current) => ({ ...current, [String(activeWeek)]: record }));
+    if (status === "AMAN") {
+      setHipFeedback("Status AMAN. Keep the planned week, remain within the easy-pace range, and continue monitoring symptoms.");
+    } else if (status === "WASPADA") {
+      setHipFeedback("Status WASPADA. The active week's running is locked to Rest / Recovery and its volume cap is reduced by 25%. Recheck symptoms before resuming structured running.");
+    } else {
+      setHipFeedback("Status PERIKSA. The active week's running is locked to Rest / Recovery and its volume cap is reduced by 25%. Arrange an assessment with a qualified sports-health clinician before returning to running.");
+    }
+  }
+
+  function handleGenerateAuthUrl() {
+    if (!clientId.trim()) {
+      setOauthMessage("Enter your Strava Client ID before generating the authorization URL.");
+      return;
+    }
+    if (!redirectUri.trim()) {
+      setOauthMessage("Enter an authorization redirect URI before generating the URL.");
+      return;
+    }
+    const parameters = new URLSearchParams({
+      client_id: clientId.trim(),
+      response_type: "code",
+      redirect_uri: redirectUri.trim(),
+      approval_prompt: "auto",
+      scope: "read,activity:read_all",
+      state: "ai-running-coach-demo",
+    });
+    setAuthUrl(`https://www.strava.com/oauth/authorize?${parameters.toString()}`);
+    setOauthMessage("Authorization URL generated. This demo has not contacted Strava and has not received an access token.");
+  }
+
+  function handleSimulatedCallback() {
+    if (!authUrl) {
+      setOauthMessage("Generate the authorization URL first. The callback simulation requires a Client ID and redirect URI.");
+      return;
+    }
+    setStravaConnection({ connected: true, mode: "simulation", connectedAt: new Date().toISOString() });
+    setOauthMessage("Simulated callback received: code=SIMULATED_AUTH_CODE. The UI is marked connected for demonstration only; no Strava account data has been accessed.");
+  }
+
+  function disconnectStravaDemo() {
+    setStravaConnection({ connected: false, mode: "simulation", connectedAt: null });
+    setOauthMessage("Demo connection cleared from this browser.");
+  }
+
+  const filteredPlan = useMemo(() => {
+    const term = searchTerm.trim().toLowerCase();
+    return TRAINING_PLAN.filter((row) => {
+      const matchesPhase = phaseFilter === "all" || row.phase === phaseFilter;
+      if (!matchesPhase) return false;
+      if (!term) return true;
+      const searchable = [
+        row.week,
+        formatDateRange(row.start, row.end),
+        row.phase,
+        row.targetVolume,
+        `${formatPace(row.easyPaceMin)}-${formatPace(row.easyPaceMax)}`,
+        row.qualityNote,
+      ].join(" ").toLowerCase();
+      return searchable.includes(term);
+    });
+  }, [searchTerm, phaseFilter]);
+
+  const recentActivities = activities.slice(0, 6);
+  const currentPhase = phaseForWeek(activeWeek);
+  const statusTone = (status) => status === "AMAN" ? "emerald" : status === "WASPADA" ? "amber" : status === "PERIKSA" ? "red" : "slate";
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 selection:bg-emerald-400/30">
+      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+        <header className="mb-8 flex flex-col gap-5 border-b border-slate-800 pb-7 md:flex-row md:items-end md:justify-between">
+          <div>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <Badge tone="emerald">3-YEAR COACHING PLAN</Badge>
+              <Badge tone="slate">LOCAL-FIRST DEMO</Badge>
+            </div>
+            <h1 className="text-3xl font-bold tracking-tight text-white sm:text-4xl">AI Running Coach</h1>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
+              A structured 157-week marathon coaching workspace with pace guardrails, a weekly hip check-in, and locally saved training records.
+            </p>
+          </div>
+          <div className="rounded-xl border border-slate-800 bg-slate-900 px-4 py-3 text-sm">
+            <div className="text-xs uppercase tracking-wider text-slate-500">Training date</div>
+            <div className="mt-1 font-semibold text-slate-100">{formatDate(today, { weekday: "long", day: "2-digit", month: "long", year: "numeric" })}</div>
+            <div className="mt-1 text-xs text-slate-500">Plan: 02 Nov 2026 – {formatDate(TRAINING_PLAN[TOTAL_WEEKS - 1].end)}</div>
+          </div>
+        </header>
+
+        <main className="space-y-6">
+          <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Active week</div>
+              <div className="mt-2 flex items-baseline gap-2"><span className="text-3xl font-bold text-white">{activeWeek}</span><span className="text-sm text-slate-500">/ {TOTAL_WEEKS}</span></div>
+              <div className="mt-2 text-sm text-slate-300">{currentPhase.name}</div>
+            </div>
+            <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Baseline weekly target</div>
+              <div className="mt-2 text-3xl font-bold text-white">{activeWeekRow.targetVolume.toFixed(1)} <span className="text-sm font-medium text-slate-500">km</span></div>
+              <div className="mt-2 text-sm text-slate-400">{formatDateRange(activeWeekRow.start, activeWeekRow.end)}</div>
+            </div>
+            <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Current volume cap</div>
+              <div className="mt-2 text-3xl font-bold text-white">{activeVolume.toFixed(1)} <span className="text-sm font-medium text-slate-500">km</span></div>
+              <div className="mt-2 text-sm text-slate-400">{activeHipLock ? "75% cap applied after hip check-in" : "No hip-related volume reduction applied"}</div>
+            </div>
+            <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Easy-pace guardrail</div>
+              <div className="mt-2 text-2xl font-bold text-emerald-300">{formatPace(activeWeekRow.easyPaceMin)}–{formatPace(activeWeekRow.easyPaceMax)}</div>
+              <div className="mt-2 text-sm text-slate-400">min/km · faster than {formatPace(activeWeekRow.easyPaceMin)} triggers recovery</div>
+            </div>
+          </section>
+
+          <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+            <Panel
+              title="Daily AI Coach Recommendation"
+              subtitle={`Tomorrow’s workout · ${formatDate(tomorrow, { weekday: "long", day: "2-digit", month: "long" })} · Week ${tomorrowWeek} · ${tomorrowWeekRow.phase}`}
+              action={tomorrowWorkout.locked ? <Badge tone="amber">RECOVERY LOCK</Badge> : <Badge tone="emerald">COACH PLAN</Badge>}
+              className="border-emerald-900/50 bg-gradient-to-br from-slate-900 to-slate-900/80"
+            >
+              <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <div className="text-2xl font-bold text-white">{tomorrowWorkout.title}</div>
+                  <p className="mt-2 max-w-xl text-sm leading-6 text-slate-300">{tomorrowWorkout.note}</p>
+                </div>
+                <div className="min-w-36 rounded-xl border border-slate-700 bg-slate-950/70 p-3 sm:text-right">
+                  <div className="text-xs uppercase tracking-wider text-slate-500">Target distance</div>
+                  <div className="mt-1 text-2xl font-bold text-white">{tomorrowWorkout.distance.toFixed(1)} <span className="text-sm font-medium text-slate-500">km</span></div>
+                  <div className="mt-1 text-xs text-slate-500">{tomorrowDurationRange}</div>
+                </div>
+              </div>
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                  <div className="text-xs uppercase tracking-wider text-slate-500">Locked easy pace range</div>
+                  <div className="mt-1 text-lg font-semibold text-emerald-300">{formatPace(tomorrowWeekRow.easyPaceMin)}–{formatPace(tomorrowWeekRow.easyPaceMax)} min/km</div>
+                  <div className="mt-1 text-xs text-slate-500">Do not chase a faster split; use the talk test.</div>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                  <div className="text-xs uppercase tracking-wider text-slate-500">Weekly volume cap</div>
+                  <div className="mt-1 text-lg font-semibold text-white">{tomorrowVolume.toFixed(1)} km</div>
+                  <div className="mt-1 text-xs text-slate-500">{tomorrowHipLock ? "Reduced 25% by hip status" : "Based on the generated 157-week plan"}</div>
+                </div>
+              </div>
+              <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Coach advice · biometrics-aware</div>
+                <p className="mt-2 text-sm leading-6 text-slate-300">{coachAdvice}</p>
+              </div>
+              <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                <span>Hip status:</span>
+                {tomorrowCheckIn ? <Badge tone={statusTone(tomorrowCheckIn.status)}>{tomorrowCheckIn.status}</Badge> : <Badge>Not checked in</Badge>}
+                {tomorrowPaceLock ? <Badge tone="amber">Pace guardrail recovery day</Badge> : null}
+              </div>
+            </Panel>
+
+            <Panel title="Training profile" subtitle="Biometrics used as context for conservative coaching advice.">
+              <div className="grid grid-cols-3 gap-2">
+                <div className="rounded-xl bg-slate-950 p-3"><div className="text-xs text-slate-500">Age</div><div className="mt-1 text-xl font-bold">{PROFILE.age}</div><div className="text-xs text-slate-500">years</div></div>
+                <div className="rounded-xl bg-slate-950 p-3"><div className="text-xs text-slate-500">Height</div><div className="mt-1 text-xl font-bold">{PROFILE.heightCm}</div><div className="text-xs text-slate-500">cm</div></div>
+                <div className="rounded-xl bg-slate-950 p-3"><div className="text-xs text-slate-500">Weight</div><div className="mt-1 text-xl font-bold">{PROFILE.weightKg}</div><div className="text-xs text-slate-500">kg</div></div>
+              </div>
+              <div className="mt-4 flex items-center justify-between rounded-xl border border-slate-800 p-3">
+                <div><div className="text-xs text-slate-500">Calculated BMI</div><div className="mt-1 text-xl font-semibold text-slate-100">{PROFILE_BMI.toFixed(1)}</div></div>
+                <Badge tone="slate">Context only</Badge>
+              </div>
+              <p className="mt-4 text-xs leading-5 text-slate-500">BMI does not determine running pace, readiness, or injury risk. Pace targets should be reassessed with training evidence and qualified coaching input, not automatically accelerated.</p>
+              <div className="mt-4 rounded-xl border border-slate-800 p-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Current phase focus</div>
+                <p className="mt-1 text-sm leading-6 text-slate-300">{currentPhase.focus}</p>
+              </div>
+            </Panel>
+          </section>
+
+          <section className="grid gap-6 lg:grid-cols-2">
+            <Panel title="Monday left-hip check-in" subtitle={`Week ${activeWeek} · Save one check-in per active week. Any non-AMAN status locks running to recovery and reduces the week's volume cap by 25%.`}>
+              <form onSubmit={handleHipSubmit} className="space-y-4">
+                <Field label="Clicking sound" hint="Report whether the left hip clicked during normal movement or recent training.">
+                  <select className={inputClass} value={hipForm.clicking} onChange={(event) => setHipForm((current) => ({ ...current, clicking: event.target.value }))}>
+                    <option value="No">No</option>
+                    <option value="Yes">Yes</option>
+                  </select>
+                </Field>
+                <Field label={`Pain score: ${hipForm.painScore} / 10`} hint="0 = no pain; 10 = worst imaginable pain. A score of 5 or more triggers PERIKSA.">
+                  <input className="w-full accent-emerald-400" type="range" min="0" max="10" step="1" value={hipForm.painScore} onChange={(event) => setHipForm((current) => ({ ...current, painScore: Number(event.target.value) }))} />
+                  <div className="flex justify-between text-xs text-slate-500"><span>0 · None</span><span>5 · Moderate</span><span>10 · Severe</span></div>
+                </Field>
+                <Field label="Symptoms" hint="Describe location, onset, duration, stiffness, pain during walking/running, or any change in your stride.">
+                  <textarea className={`${inputClass} min-h-24 resize-y`} value={hipForm.symptoms} onChange={(event) => setHipForm((current) => ({ ...current, symptoms: event.target.value }))} />
+                </Field>
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950 p-3">
+                  <div>
+                    <div className="text-xs uppercase tracking-wider text-slate-500">Live evaluation</div>
+                    <div className="mt-1"><Badge tone={statusTone(liveHipStatus)}>{liveHipStatus}</Badge></div>
+                  </div>
+                  <span className="max-w-xs text-right text-xs leading-5 text-slate-500">{liveHipStatus === "AMAN" ? "No reported warning signs in this form." : liveHipStatus === "WASPADA" ? "Modify training and monitor symptoms." : "Stop running and seek clinical assessment."}</span>
+                </div>
+                <button type="submit" className={buttonClass}>Save Week {activeWeek} Check-in</button>
+              </form>
+              {activeCheckIn ? (
+                <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-sm font-semibold">Saved status</span><Badge tone={statusTone(activeCheckIn.status)}>{activeCheckIn.status}</Badge></div>
+                  <p className="mt-2 text-sm leading-6 text-slate-300">{activeCheckIn.status === "AMAN" ? "The plan remains available; continue monitoring the hip." : "Running sessions for this active week are locked to Rest / Recovery. Weekly volume is capped at 75% of the base plan."}</p>
+                  {activeCheckIn.status === "PERIKSA" ? <p className="mt-2 text-xs leading-5 text-red-300">A form status is not a diagnosis. Arrange an in-person assessment, especially with significant pain, swelling, limping, night/rest pain, or difficulty bearing weight.</p> : null}
+                </div>
+              ) : <p className="mt-3 text-xs text-slate-500">No check-in saved for the active week yet. The live evaluation above is a preview until you save it.</p>}
+              {hipFeedback ? <p className="mt-3 rounded-xl border border-slate-800 bg-slate-950 p-3 text-sm leading-6 text-slate-300">{hipFeedback}</p> : null}
+            </Panel>
+
+            <Panel title="Connect Strava Account" subtitle="Client ID and redirect URL preview only. This front-end demo does not exchange tokens or import activity automatically." action={stravaConnection.connected ? <Badge tone="emerald">SIMULATED CONNECTED</Badge> : <Badge>NOT CONNECTED</Badge>}>
+              <div className="space-y-4">
+                <Field label="Strava Client ID" hint="Use the numeric Client ID from your Strava API application. A client secret is never requested or stored here.">
+                  <input className={inputClass} type="text" inputMode="numeric" value={clientId} onChange={(event) => setClientId(event.target.value)} />
+                </Field>
+                <Field label="Authorization redirect URI" hint="Must match the redirect domain/path configured in your Strava API application when using real OAuth.">
+                  <input className={inputClass} type="url" value={redirectUri} onChange={(event) => setRedirectUri(event.target.value)} />
+                </Field>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" className={buttonClass} onClick={handleGenerateAuthUrl}>Generate authorization URL</button>
+                  <button type="button" className={secondaryButtonClass} onClick={handleSimulatedCallback} disabled={!authUrl}>Simulate OAuth callback</button>
+                  {stravaConnection.connected ? <button type="button" className={secondaryButtonClass} onClick={disconnectStravaDemo}>Disconnect demo</button> : null}
+                </div>
+                {authUrl ? (
+                  <div className="rounded-xl border border-slate-800 bg-slate-950 p-3">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Generated authorization URL</div>
+                    <code className="block break-all text-xs leading-5 text-sky-300">{authUrl}</code>
+                  </div>
+                ) : null}
+                {oauthMessage ? <p className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-sm leading-6 text-slate-300">{oauthMessage}</p> : null}
+                <div className="rounded-xl border border-amber-900/60 bg-amber-950/20 p-3 text-xs leading-5 text-amber-200/90">
+                  Production requirement: complete the OAuth code exchange on a trusted server, validate the state parameter, store tokens securely, and call Strava APIs from that server. Do not expose a client secret in this SPA.
+                </div>
+              </div>
+            </Panel>
+          </section>
+
+          <section className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+            <Panel title="Manual activity logger" subtitle="Log a completed run locally. Pace is calculated from duration ÷ distance; heart rate is recorded as the session average.">
+              <form onSubmit={handleActivitySubmit} className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field label="Distance (km)">
+                    <input className={inputClass} type="number" min="0.1" max="100" step="0.1" value={activityForm.distance} onChange={(event) => setActivityForm((current) => ({ ...current, distance: event.target.value }))} />
+                  </Field>
+                  <Field label="Time (minutes)" hint="Total elapsed duration, including walk breaks.">
+                    <input className={inputClass} type="number" min="1" max="1440" step="0.1" value={activityForm.duration} onChange={(event) => setActivityForm((current) => ({ ...current, duration: event.target.value }))} />
+                  </Field>
+                  <Field label="Calculated pace (min/km)">
+                    <input className={`${inputClass} cursor-not-allowed text-emerald-300`} value={calculatedPace ? `${formatPace(calculatedPace)} min/km` : "Enter distance and time"} readOnly />
+                  </Field>
+                  <Field label="Average heart rate (bpm)">
+                    <input className={inputClass} type="number" min="30" max="230" step="1" value={activityForm.heartRate} onChange={(event) => setActivityForm((current) => ({ ...current, heartRate: event.target.value }))} />
+                  </Field>
+                </div>
+                <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-xs leading-5 text-slate-400">
+                  Pace guardrail: any logged pace faster than <span className="font-semibold text-emerald-300">{formatPace(activeWeekRow.easyPaceMin)} min/km</span> triggers an overpacing alert and automatically reserves tomorrow for recovery.
+                </div>
+                <button type="submit" className={buttonClass}>Save activity & check pace</button>
+              </form>
+              {logFeedback ? (
+                <div className={`mt-4 rounded-xl border p-3 text-sm leading-6 ${logFeedback.tone === "amber" ? "border-amber-800 bg-amber-950/30 text-amber-200" : logFeedback.tone === "red" ? "border-red-800 bg-red-950/30 text-red-200" : "border-emerald-900 bg-emerald-950/20 text-emerald-200"}`}>
+                  {logFeedback.text}
+                </div>
+              ) : null}
+            </Panel>
+
+            <Panel title="Recent training activity" subtitle={`${activities.length} locally stored ${activities.length === 1 ? "activity" : "activities"}. Records remain in this browser's LocalStorage.`}>
+              {recentActivities.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/60 p-6 text-center">
+                  <p className="text-sm font-medium text-slate-300">No activities logged yet</p>
+                  <p className="mt-1 text-xs text-slate-500">Use the activity logger to record distance, time, pace, and heart rate.</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[520px] text-left text-sm">
+                    <thead className="text-xs uppercase tracking-wider text-slate-500"><tr><th className="pb-3 pr-3 font-medium">Date</th><th className="pb-3 pr-3 font-medium">Distance</th><th className="pb-3 pr-3 font-medium">Time</th><th className="pb-3 pr-3 font-medium">Pace</th><th className="pb-3 font-medium">HR</th></tr></thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {recentActivities.map((activity) => (
+                        <tr key={activity.id}>
+                          <td className="py-3 pr-3 text-slate-400">{activity.date}</td>
+                          <td className="py-3 pr-3 font-medium text-slate-200">{activity.distance.toFixed(1)} km</td>
+                          <td className="py-3 pr-3 text-slate-300">{formatDuration(activity.durationMinutes)}</td>
+                          <td className="py-3 pr-3"><span className={activity.paceMinutes < EASY_PACE_MIN ? "font-semibold text-amber-300" : "text-emerald-300"}>{activity.pace}</span></td>
+                          <td className="py-3 text-slate-300">{activity.heartRate} bpm</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {guardrailEvents.length > 0 ? (
+                <div className="mt-4 border-t border-slate-800 pt-4">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-amber-300">Recent pace guardrail alerts</div>
+                  <div className="space-y-2">
+                    {guardrailEvents.slice(0, 3).map((item) => (
+                      <div key={item.id} className="rounded-lg border border-amber-900/50 bg-amber-950/20 px-3 py-2 text-xs leading-5 text-amber-100/90">
+                        {item.date}: {item.distance.toFixed(1)} km at {item.pace} min/km (limit {item.limit}); recovery reserved for {item.recoveryDate}.
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </Panel>
+          </section>
+
+          <Panel title="157-week marathon plan" subtitle="Generated from 02 November 2026 through 04 November 2029. Search by week, date, phase, volume, pace, or workout note; filter by phase. The current row reflects any hip-related 25% volume reduction.">
+            <div className="mb-4 grid gap-3 sm:grid-cols-[1fr_260px]">
+              <Field label="Search plan">
+                <input className={inputClass} type="search" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} />
+              </Field>
+              <Field label="Filter by phase">
+                <select className={inputClass} value={phaseFilter} onChange={(event) => setPhaseFilter(event.target.value)}>
+                  <option value="all">All phases</option>
+                  {PHASES.map((phase) => <option key={phase.id} value={phase.name}>{phase.name}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+              <span>Showing {filteredPlan.length} of {TOTAL_WEEKS} weeks</span>
+              <span>Easy-pace baseline: {formatPace(EASY_PACE_MIN)}–{formatPace(EASY_PACE_MAX)} min/km · locked until reassessed</span>
+            </div>
+            <div className="max-h-[620px] overflow-auto rounded-xl border border-slate-800">
+              <table className="w-full min-w-[900px] border-collapse text-left text-sm">
+                <thead className="sticky top-0 z-10 bg-slate-800 text-xs uppercase tracking-wider text-slate-300">
+                  <tr>
+                    <th className="px-3 py-3 font-semibold">Week</th>
+                    <th className="px-3 py-3 font-semibold">Dates</th>
+                    <th className="px-3 py-3 font-semibold">Phase</th>
+                    <th className="px-3 py-3 font-semibold">Target volume</th>
+                    <th className="px-3 py-3 font-semibold">Easy pace</th>
+                    <th className="px-3 py-3 font-semibold">Quality workout note</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800 bg-slate-900/50">
+                  {filteredPlan.map((row) => {
+                    const isActive = row.week === activeWeek;
+                    const volume = isActive ? activeVolume : row.targetVolume;
+                    return (
+                      <tr key={row.week} className={isActive ? "bg-emerald-950/30" : "hover:bg-slate-800/40"}>
+                        <td className="whitespace-nowrap px-3 py-3 font-semibold text-slate-100">{row.week}{isActive ? <span className="ml-2 text-[10px] font-semibold uppercase tracking-wider text-emerald-300">Current</span> : null}</td>
+                        <td className="whitespace-nowrap px-3 py-3 text-slate-400">{formatDateRange(row.start, row.end)}</td>
+                        <td className="px-3 py-3 text-slate-300">{row.phase}</td>
+                        <td className="whitespace-nowrap px-3 py-3 font-medium text-slate-200">{volume.toFixed(1)} km{isActive && activeHipLock ? <span className="ml-2 text-xs text-amber-300">−25%</span> : null}</td>
+                        <td className="whitespace-nowrap px-3 py-3 text-emerald-300">{formatPace(row.easyPaceMin)}–{formatPace(row.easyPaceMax)}</td>
+                        <td className="max-w-xl px-3 py-3 leading-6 text-slate-400">{row.qualityNote}</td>
+                      </tr>
+                    );
+                  })}
+                  {filteredPlan.length === 0 ? <tr><td colSpan="6" className="px-4 py-10 text-center text-sm text-slate-500">No weeks match the current search and phase filter.</td></tr> : null}
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {PHASES.slice(0, 6).map((phase) => (
+                <div key={phase.id} className="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                  <div className="flex items-center justify-between gap-2"><span className="text-sm font-semibold text-slate-200">{phase.name}</span><span className="text-xs text-slate-500">Weeks {phase.start}–{phase.end}</span></div>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">{phase.focus}</p>
+                </div>
+              ))}
+            </div>
+          </Panel>
+
+          <footer className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 text-xs leading-6 text-slate-500">
+            <div className="font-semibold text-slate-300">Coaching and safety notes</div>
+            This is a planning and logging tool, not a medical device or a substitute for an individualized assessment. The 157-week mileage progression is a conservative template, not a validated prescription for every runner. Do not progress through pain, persistent fatigue, altered gait, or illness. The pace range is a locked starting guardrail rather than a universal physiological zone; reassess it using observed effort and qualified coaching input. Seek prompt medical care for severe pain, inability to bear weight, significant swelling, or other concerning symptoms. All app records are stored in this browser only and may be cleared by the browser's site-data controls.
+          </footer>
+        </main>
+      </div>
+    </div>
+  );
+}
