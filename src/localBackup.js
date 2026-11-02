@@ -95,7 +95,9 @@ export function parseLocalBackup(json) {
   if (!isRecord(profile)
     || !Number.isInteger(profile.age) || !isPositiveNumber(profile.age)
     || !isPositiveNumber(profile.heightCm)
-    || !isPositiveNumber(profile.weightKg)) {
+    || !isPositiveNumber(profile.weightKg)
+    || (Object.hasOwn(profile, "marathonGoalPace")
+      && (!Number.isFinite(profile.marathonGoalPace) || profile.marathonGoalPace < 5 || profile.marathonGoalPace > 15))) {
     throw new Error("The backup contains an invalid training profile.");
   }
 
