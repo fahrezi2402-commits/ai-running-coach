@@ -1275,61 +1275,67 @@ export default function App() {
                       Pilihan opsional untuk hari libur / strength yang dipilih. Hanya memakai berat badan sendiri dan ruang lantai; tidak memakai dumbbell, beban, kursi, atau alat improvisasi.
                     </p>
                   </div>
-                  <Badge tone="emerald">2 PUTARAN · ±40–50 MENIT</Badge>
+                  <Badge tone="emerald">1–2 PUTARAN · ±45–70 MENIT</Badge>
                 </div>
 
                 <div className="mt-4 grid gap-4 lg:grid-cols-2">
                   <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                    <h4 className="font-semibold text-slate-100">Pemanasan dinamis · 7–10 menit</h4>
+                    <h4 className="font-semibold text-slate-100">Pemanasan dinamis · 12–15 menit</h4>
                     <ol className="mt-2 list-inside list-decimal space-y-1 text-sm leading-6 text-slate-300">
                       {BODYWEIGHT_WORKOUT.warmup.map((item) => <li key={item.name}>{item.name}: {item.duration}.</li>)}
                     </ol>
                   </div>
                   <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                    <h4 className="font-semibold text-slate-100">Circuit dan intensitas</h4>
+                    <h4 className="font-semibold text-slate-100">Circuit dan frekuensi opsional</h4>
                     <p className="mt-2 text-sm leading-6 text-slate-300">
-                      Selesaikan setiap gerakan berurutan, lalu ulangi circuit 2 putaran. Putaran ketiga opsional bila sudah terbiasa dan tetap nyaman. Istirahat 60–90 detik setelah tiap gerakan dan 1–2 menit antar-putaran; kurangi repetisi atau berhenti sejenak bila perlu. Pemula dapat gunakan modifikasi low-impact.
+                      Pemula mulai 1 putaran; bila sudah terbiasa dan tetap nyaman, lakukan 2 putaran. Istirahat 60–90 detik antar-gerakan dan 1–2 menit antar-putaran. Maksimal 2 sesi opsional per minggu hanya jika tidak berdekatan atau mengganggu sesi interval/long run; jangan mengganti hari recovery. Kurangi repetisi atau berhenti bila gerakan terasa tidak nyaman.
                     </p>
                   </div>
                 </div>
 
-                <ol className="mt-4 grid gap-3 lg:grid-cols-2">
-                  {BODYWEIGHT_WORKOUT.movements.map((movement, index) => (
-                    <li key={movement.name} className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                      {index === 0 || BODYWEIGHT_WORKOUT.movements[index - 1].category !== movement.category ? (
-                        <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-emerald-300">{movement.category}</div>
-                      ) : null}
-                      <div className="grid gap-3 sm:grid-cols-[112px_1fr]">
-                        <BodyweightExerciseIllustration type={movement.illustration} label={movement.name} />
-                        <div>
-                          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                            <h4 className="font-semibold text-slate-100">{index + 1}. {movement.name}</h4>
-                            <span className="text-sm font-medium text-emerald-300">{movement.prescription}</span>
-                          </div>
-                          <ol className="mt-2 list-inside list-decimal space-y-1 text-sm leading-6 text-slate-300">
-                            {movement.steps.map((step) => <li key={step}>{step}</li>)}
-                          </ol>
-                          <p className="mt-2 text-xs leading-5 text-slate-400"><strong className="text-slate-300">Modifikasi pemula:</strong> {movement.easier}</p>
-                        </div>
-                      </div>
-                    </li>
+                <div className="mt-4 space-y-5">
+                  {BODYWEIGHT_WORKOUT.blocks.map((block, blockIndex) => (
+                    <section key={block.name} aria-labelledby={`bodyweight-block-${blockIndex}`}>
+                      <h4 id={`bodyweight-block-${blockIndex}`} className="mb-3 text-sm font-semibold uppercase tracking-wider text-emerald-300">{block.name}</h4>
+                      <ol className="grid gap-3 lg:grid-cols-2">
+                        {block.movements.map((movement, index) => (
+                          <li key={movement.name} className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                            <div className="grid gap-3 sm:grid-cols-[112px_1fr]">
+                              <BodyweightExerciseIllustration type={movement.illustration} label={movement.name} />
+                              <div>
+                                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                                  <h5 className="font-semibold text-slate-100">{blockIndex + 1}.{index + 1}. {movement.name}</h5>
+                                  <span className="text-sm font-medium text-emerald-300">{movement.prescription}</span>
+                                </div>
+                                <ol className="mt-2 list-inside list-decimal space-y-1 text-sm leading-6 text-slate-300">
+                                  {movement.steps.map((step) => <li key={step}>{step}</li>)}
+                                </ol>
+                                <p className="mt-2 text-xs leading-5 text-slate-400"><strong className="text-slate-300">Modifikasi pemula:</strong> {movement.easier}</p>
+                                {movement.advanced ? <p className="mt-2 text-xs leading-5 text-amber-200/90"><strong>Pilihan/progresi:</strong> {movement.advanced}</p> : null}
+                              </div>
+                            </div>
+                          </li>
+                        ))}
+                      </ol>
+                    </section>
                   ))}
-                </ol>
+                </div>
 
                 <div className="mt-4 grid gap-4 sm:grid-cols-2">
                   <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                    <h4 className="font-semibold text-slate-100">Pendinginan · 5–8 menit</h4>
+                    <h4 className="font-semibold text-slate-100">Pendinginan · 12–15 menit</h4>
                     <ol className="mt-2 list-inside list-decimal space-y-1 text-sm leading-6 text-slate-300">
                       {BODYWEIGHT_WORKOUT.cooldown.map((step) => <li key={step.name}>{step.name}: {step.duration}.</li>)}
                     </ol>
+                    <p className="mt-2 text-xs leading-5 text-slate-400">Akhiri dengan jalan pelan dan bernapas nyaman sampai total waktu tercapai.</p>
                   </div>
                   <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
                     <h4 className="font-semibold text-slate-100">Catatan penting</h4>
                     <p className="mt-2 text-sm leading-6 text-slate-300">
-                      Lompatan diganti squat dan langkah samping low-impact; Bulgarian split squat diganti reverse lunge tanpa elevasi kaki. Doorframe/table row tidak digunakan karena furnitur bukan anchor yang terjamin aman; prone reverse snow angels menjadi gerakan postur di lantai, bukan klaim sebagai row berbeban.
+                      Pilihan default tetap low-impact: calf raise dan squat pelan, bukan pogo/depth jump. Reverse lunge/split squat dilakukan dengan kedua kaki di lantai; tidak memakai kursi untuk elevasi. Pike push-up versi lantai, tanpa decline. Y-T-W-I dan reverse snow angels menggantikan pola row tanpa beban; side plank/dead bug menggantikan Pallof hold. Tidak memakai pintu/meja sebagai anchor atau alat.
                     </p>
                     <p className="mt-2 text-sm leading-6 text-amber-200">
-                      Ini opsional pada hari tanpa lari, bukan pengganti atau tambahan untuk mengejar jarak; tidak mengubah jadwal dan tidak dihitung dalam mileage atau volume mingguan. Jika ada nyeri/gejala berubah atau recovery/hip lock aktif, jangan lakukan circuit—pilih istirahat atau mobilitas ringan tanpa nyeri hanya jika nyaman.
+                      Tutorial hanya untuk hari off yang tidak terkunci; bila recovery/hip lock aktif, ada nyeri, atau gejala berubah, jangan lakukan circuit. Utamakan istirahat atau mobilitas ringan tanpa nyeri hanya jika terasa nyaman. Sesi ini opsional, tidak mengganti lari, serta tidak mengubah jadwal, mileage, atau volume mingguan.
                     </p>
                   </div>
                 </div>

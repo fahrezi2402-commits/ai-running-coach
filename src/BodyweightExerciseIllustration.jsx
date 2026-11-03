@@ -37,11 +37,27 @@ function ExerciseDrawing({ type }) {
           <path d="M44 68 69 67l25-20 23 18 18 1m-66 1-7 12m55-15 6 15m19-14 6 14m-44-35 2-17 13-12" {...line} />
         </>
       );
-    case "ytw":
+    case "calfRaise":
+      return (
+        <>
+          <Head x="86" y="18" />
+          <path d="M86 26v28m0-17-16 13m16-13 16 13m-16 4-9 17-8 12m17-29 9 17 8-7" {...line} />
+          <path d="M113 73v-9m-5 5 5-6 5 6" stroke="#38bdf8" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+        </>
+      );
+    case "singleRdl":
+      return (
+        <>
+          <Head x="87" y="18" />
+          <path d="M87 26v25m0-17-17 13m17-13 17 13m-17 4-4 22-4 13m8-35-20 18-13 4m33-22 13 14 9 8" {...line} />
+        </>
+      );
+    case "ytwi":
       return (
         <>
           <Head x="90" y="57" />
           <path d="M83 61 53 36m37 21 30-21m-30 21-35 0m35 0 35 0m-35 0-19 20m19-20 19 20" {...line} />
+          <path d="M90 58 90 28m-7 32-15-17m32 17 15-17" stroke="#38bdf8" strokeWidth="2.5" strokeLinecap="round" />
         </>
       );
     case "pike":
@@ -77,6 +93,21 @@ function ExerciseDrawing({ type }) {
         <>
           <Head x="43" y="61" />
           <path d="M51 62q33-25 64-5m-64 5-17-18m17 18-13 18m60-23 21 8 15 13m-36-17 5 19m-24-15-9 14" {...line} />
+        </>
+      );
+    case "sidePlank":
+      return (
+        <>
+          <Head x="44" y="54" />
+          <path d="M52 56 94 58l40 6m-82-8-10 15m55-12 8 16m30-13 6 13" {...line} />
+          <path d="M24 83h18m103 0h12" stroke="#38bdf8" strokeWidth="3" strokeLinecap="round" />
+        </>
+      );
+    case "deadBug":
+      return (
+        <>
+          <Head x="42" y="62" />
+          <path d="M50 63q28-6 52 0m-52 0-17-15m17 15-8 18m60-18 17-23m-17 23 22 17m-49-16-3 17m19-17 4 17" {...line} />
         </>
       );
     default:
